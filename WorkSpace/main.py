@@ -21,6 +21,7 @@ def main():
     prev_time = 0
 
     while True:
+        #읽기
         frame = stream.read()
         if frame is None: continue
 
