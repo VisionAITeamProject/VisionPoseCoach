@@ -87,7 +87,7 @@ class OpenCVCameraSource:
 class PiCamera2Source:
     """
     Raspberry Pi Camera Module용 카메라 래퍼.
-
+    haha
     내부적으로 Picamera2를 사용하지만,
     외부에서는 OpenCVCameraSource와 동일하게
     open(), start(), read(), release() 형태로 사용한다.
@@ -212,11 +212,28 @@ class CameraWorker(QThread):
             duration=config.CALIBRATION_TIME,
         )
 
+
+        print("초기화 성공")
+
+        # 하드웨어 컨트롤러
+        if hardware_controller is None:
+            self.hardware_controller = HardwareController(
+                enabled=config.HARDWARE_ENABLED,
+                serial_port=config.HARDWARE_SERIAL_PORT,
+                baud_rate=config.HARDWARE_BAUD_RATE,
+                timeout=config.HARDWARE_TIMEOUT,
+            )
+            self.owns_hardware_controller = True
+        else:
+            self.hardware_controller = hardware_controller
+            self.owns_hardware_controller = False
+
         # face calibration service 추가
         self.calibration_service_face = CalibrationService(
             baseline_path=self.resolve_workspace_path(config.FACE_BASELINE_PATH),
             duration=config.CALIBRATION_TIME,
         )
+
 
         self.pose_calibration_result = None
         self.face_calibration_result = None
@@ -633,6 +650,7 @@ class CameraWorker(QThread):
         self.mode = RunMode.CALIBRATING
         self.status_changed.emit("초기 자세/얼굴 기준값 측정을 시작합니다. "
                                  f"{config.CALIBRATION_TIME}초 동안 바른 자세를 유지해주세요.")
+
 
     def process_calibration(self, raw_features, results_face): #face feature도 넘겨주도록 수정
         """

@@ -73,6 +73,7 @@ class GruInferenceService:
         self.scaler_path = str(scaler_path)
         self.face_scaler_path = str(face_scaler_path)
 
+
         self.base_line = self.load_baseline(base_line_path, feature_size=config.POSE_FEATURE_SIZE, name="pose")
         print(f"self.base_line : {self.base_line}")
 
@@ -203,7 +204,6 @@ class GruInferenceService:
         
         safe_face_features = np.array(safe_face_features)- self.base_line_face
         safe_face_features = list(safe_face_features)
-
 
         self.pose_window.append(safe_pose_features)
         self.face_window.append(safe_face_features)
@@ -555,18 +555,18 @@ class GruInferenceService:
 
     def load_baseline(self, path, feature_size, name="baseline"):
         if os.path.exists(path):
-            print(f"✅ {name} 기준값 로드 완료: {path}")
+            print(f"{name} 기준값 로드 완료: {path}")
             
             baseline = joblib.load(path)
             baseline = np.asarray(baseline, dtype=np.float32)
 
             if baseline.size != feature_size:
-                print(f"⚠️ {name} 기준값 개수 불일치: "
+                print(f"{name} 기준값 개수 불일치: "
                     f"현재={baseline.size}, 필요={feature_size}. 0으로 대체합니다.")
                 return np.zeros(feature_size, dtype=np.float32)
 
             return baseline
 
         else:
-            print(f"⚠️ {name} 기준값 파일이 없어 모든 피처를 0으로 초기화합니다.")
+            print(f"{name} 기준값 파일이 없어 모든 피처를 0으로 초기화합니다.")
             return np.zeros(feature_size, dtype=np.float32)
