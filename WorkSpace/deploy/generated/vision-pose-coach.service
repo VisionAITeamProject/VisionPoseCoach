@@ -1,0 +1,17 @@
+[Unit]
+Description=Vision Pose Coach FastAPI Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/VisionPoseCoach/WorkSpace
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/home/pi/VisionPoseCoach/WorkSpace
+ExecStart=/home/pi/VisionPoseCoach/WorkSpace/.venv/bin/python server_main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

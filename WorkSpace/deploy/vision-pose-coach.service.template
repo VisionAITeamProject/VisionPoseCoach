@@ -1,0 +1,17 @@
+[Unit]
+Description=Vision Pose Coach FastAPI Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{USER}}
+WorkingDirectory={{PROJECT_DIR}}
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH={{PROJECT_DIR}}
+ExecStart={{PYTHON_BIN}} server_main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

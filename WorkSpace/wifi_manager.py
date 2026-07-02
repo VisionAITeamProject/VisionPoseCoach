@@ -1,4 +1,16 @@
-# wifi_manager.py
+"""
+LEGACY / EXPERIMENTAL FILE
+
+이 파일은 현재 FastAPI 서버에서 사용하지 않습니다.
+현재 서버에서 사용하는 WiFiManager는 network/wifi_manager.py입니다.
+
+주의:
+이 파일에는 실제 OS WiFi 설정을 변경할 수 있는 nmcli 기반 코드가 포함되어 있습니다.
+현재 개발 서버와 앱 연동 구조에서는 import하거나 실행하지 마세요.
+
+실제 Raspberry Pi WiFi 연결 구현이 필요할 경우,
+network/wifi_manager.py의 dry-run 구조를 기반으로 별도 real mode를 안전하게 확장하세요.
+"""
 
 import subprocess
 
@@ -145,3 +157,8 @@ def get_wifi_status():
         "connected": active_wifi is not None,
         "wifi": active_wifi
     }
+
+
+if __name__ == "__main__":
+    print("This is a legacy experimental WiFi manager. Use network/wifi_manager.py instead.")
+    raise SystemExit(1)

@@ -1,7 +1,6 @@
 import json
-from dataclasses import asdict
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
 from camera.camera_manager import CameraManager
@@ -10,7 +9,9 @@ from core.app_state import AppState
 from core.calibration_manager import CalibrationManager
 from core.inference_manager import InferenceManager
 from core.session_controller import SessionController
+from network.ble_provisioning_manager import BLEProvisioningManager
 from network.mjpg_streamer import MjpgStreamer
+from network.wifi_manager import WiFiManager
 
 
 class WebSocketConnectionManager:
@@ -47,6 +48,8 @@ def create_app():
     calibration_manager = CalibrationManager(camera_manager, vision_processor)
     inference_manager = InferenceManager(camera_manager, vision_processor)
     mjpg_streamer = MjpgStreamer(camera_manager)
+    wifi_manager = WiFiManager(mode="dry_run")
+    ble_provisioning_manager = BLEProvisioningManager(wifi_manager, mode="dry_run")
     session_controller = SessionController(
         app_state,
         None,
@@ -58,6 +61,8 @@ def create_app():
     session_controller.broadcast = ws_manager.broadcast
 
     app = FastAPI(title="VisionPoseCoach Server", version="0.1.0")
+    app.state.wifi_manager = wifi_manager
+    app.state.ble_provisioning_manager = ble_provisioning_manager
 
     @app.get("/health")
     def health():
@@ -66,22 +71,37 @@ def create_app():
         vision_status = vision_processor.status()
         calibration_status = calibration_manager.status()
         inference_status = inference_manager.status()
+        network_status = wifi_manager.get_network_status()["wifi"]
+        provisioning_status = ble_provisioning_manager.get_status()
+        server_ready = True
+        network_ready = True if network_status.get("mode") == "dry_run" else bool(network_status.get("connected"))
+        camera_ready = camera_status.get("using_dummy", True) is False
+        device_ready = server_ready and network_ready and camera_ready
 
         return {
             "type": "health",
             "ok": True,
             "app": {
-                "server_ready": True,
-                "device_ready": camera_status.get("using_dummy", False) is False,
-                "camera_ready": camera_status.get("using_dummy", True) is False,
+                "server_ready": server_ready,
+                "device_ready": device_ready,
+                "network_ready": network_ready,
+                "wifi_connected": bool(network_status.get("connected")),
+                "provisioning_required": bool(network_status.get("provisioning_required")),
+                "provisioning_state": provisioning_status.get("provisioning_state"),
+                "ble_available": bool(provisioning_status.get("available")),
+                "ble_advertising": bool(provisioning_status.get("advertising")),
+                "camera_ready": camera_ready,
                 "vision_ready": vision_status.get("enabled", False),
                 "calibration_ready": calibration_status.get("ready", False),
                 "inference_ready": inference_status.get("ready", False),
                 "session_running": session_snapshot.is_running,
                 "state": session_snapshot.state,
+                "screen_hint": session_controller._get_screen_hint(session_snapshot.state),
                 "message": session_snapshot.message or "기기 준비됨",
             },
             "debug": {
+                "network": network_status,
+                "provisioning": provisioning_status,
                 "camera": camera_status,
                 "vision": vision_status,
                 "calibration": calibration_status,
@@ -90,6 +110,53 @@ def create_app():
                 "measurement_loop": session_controller.measurement_loop_status(),
             },
         }
+
+    @app.get("/network/status")
+    def network_status():
+        return wifi_manager.get_network_status()
+
+    @app.get("/network/wifi/scan")
+    def network_wifi_scan():
+        return wifi_manager.list_networks()
+
+    @app.post("/network/wifi/configure")
+    def network_wifi_configure(payload: dict = Body(...)):
+        safe_payload = wifi_manager.mask_sensitive_data(payload)
+        return wifi_manager.configure_wifi(
+            safe_payload.get("ssid"),
+            payload.get("password"),
+        )
+
+    @app.post("/network/wifi/forget")
+    def network_wifi_forget():
+        return wifi_manager.forget_wifi()
+
+    @app.get("/provisioning/status")
+    def provisioning_status():
+        return ble_provisioning_manager.get_registration_status()
+
+    @app.get("/provisioning/ble/status")
+    def provisioning_ble_status():
+        return {
+            "type": "ble_status",
+            "ble": ble_provisioning_manager.get_status(),
+        }
+
+    @app.post("/provisioning/ble/start")
+    def provisioning_ble_start():
+        return ble_provisioning_manager.start_advertising()
+
+    @app.post("/provisioning/ble/stop")
+    def provisioning_ble_stop():
+        return ble_provisioning_manager.stop_advertising()
+
+    @app.post("/provisioning/ble/message")
+    def provisioning_ble_message(payload: dict = Body(...)):
+        return ble_provisioning_manager.handle_provisioning_message(payload)
+
+    @app.post("/provisioning/ble/reset")
+    def provisioning_ble_reset():
+        return ble_provisioning_manager.reset_provisioning()
 
     @app.get("/mjpg")
     def mjpg():

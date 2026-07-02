@@ -70,20 +70,36 @@ class SessionController:
             if action == "stop_session":
                 return await self.stop_session()
 
-            return None
+            return self._build_error_payload(
+                "UNKNOWN_COMMAND",
+                "알 수 없는 명령입니다.",
+                state=self.app_state.snapshot().state,
+            )
 
         if command == "start_session":
-            return await self.start_session()
+            return self._build_error_payload(
+                "INVALID_DURATION",
+                "측정 시간이 올바르지 않습니다.",
+                state=self.app_state.snapshot().state,
+            )
 
         if command == "stop_session":
             return await self.stop_session()
 
-        return None
+        return self._build_error_payload(
+            "UNKNOWN_COMMAND",
+            "알 수 없는 명령입니다.",
+            state=self.app_state.snapshot().state,
+        )
 
     async def start_session(self, duration_sec=None):
         async with self._lock:
             if self._session_task is not None and not self._session_task.done():
-                return await self._publish_snapshot()
+                return self._build_error_payload(
+                    "SESSION_ALREADY_RUNNING",
+                    "이미 측정이 진행 중입니다.",
+                    state=self.app_state.snapshot().state,
+                )
 
             duration_sec = self._normalize_duration(duration_sec)
             self._session_created_at = datetime.now(timezone.utc)
@@ -118,6 +134,12 @@ class SessionController:
             if self._session_task is not None and not self._session_task.done():
                 task = self._session_task
                 task.cancel()
+            else:
+                return self._build_error_payload(
+                    "NO_ACTIVE_SESSION",
+                    "진행 중인 측정 세션이 없습니다.",
+                    state=self.app_state.snapshot().state,
+                )
             self._session_task = None
 
         if task is not None:
@@ -217,7 +239,7 @@ class SessionController:
                 remain_sec=self._duration_sec,
                 session_elapsed_sec=0,
                 session_remain_sec=self._duration_sec,
-                stage_remain_sec=self._duration_sec,
+                stage_remain_sec=None,
                 measuring_started_at=self._measuring_started_at.isoformat(),
                 is_running=True,
             )
@@ -457,6 +479,7 @@ class SessionController:
         return {
             "type": "measurement",
             "session_id": self._session_id,
+            "is_running": True,
             "state": SessionStatus.MEASURING.value,
             "screen_hint": self._get_screen_hint(SessionStatus.MEASURING),
             "elapsed_sec": elapsed_sec,
@@ -545,7 +568,7 @@ class SessionController:
             stop_reason=stop_reason,
             is_running=False,
         )
-        await self.broadcast(self._build_status_payload(snapshot))
+        await self._broadcast(self._build_status_payload(snapshot))
         return snapshot
 
     async def _publish_status(
@@ -585,13 +608,17 @@ class SessionController:
             stop_reason=stop_reason if stop_reason is not _KEEP_CURRENT else current_snapshot.stop_reason,
             is_running=is_running if is_running is not None else current_snapshot.is_running,
         )
-        await self.broadcast(self._build_status_payload(snapshot))
+        await self._broadcast(self._build_status_payload(snapshot))
         return snapshot
 
     async def _publish_snapshot(self):
         snapshot = self.app_state.snapshot()
-        await self.broadcast(self._build_session_snapshot_payload(snapshot))
+        await self._broadcast(self._build_session_snapshot_payload(snapshot))
         return snapshot
+
+    async def _broadcast(self, payload: dict):
+        if self.broadcast is not None:
+            await self.broadcast(payload)
 
     def _compact_latest_result(self, result: dict | None):
         if result is None:
@@ -624,15 +651,15 @@ class SessionController:
         }
         return mapping.get(normalized_state, "HOME")
 
-    def _build_session_snapshot_payload(self, snapshot=None):
+    def _build_session_base_payload(self, snapshot=None):
         if snapshot is None:
             snapshot = self.app_state.snapshot()
+        message = snapshot.message or ("측정 대기 중입니다." if snapshot.state == SessionStatus.IDLE.value else None)
         return {
-            "type": "session_snapshot",
             "session_id": snapshot.session_id,
             "is_running": snapshot.is_running,
             "state": snapshot.state,
-            "message": snapshot.message,
+            "message": message,
             "screen_hint": self._get_screen_hint(snapshot.state),
             "stage_remain_sec": snapshot.stage_remain_sec,
             "elapsed_sec": snapshot.elapsed_sec,
@@ -642,10 +669,14 @@ class SessionController:
             "latest_result": self._compact_latest_result(snapshot.latest_result),
         }
 
+    def _build_session_snapshot_payload(self, snapshot=None):
+        return {"type": "session_snapshot", **self._build_session_base_payload(snapshot)}
+
     def _build_status_payload(self, snapshot):
         return {
             "type": "status",
             "session_id": snapshot.session_id,
+            "is_running": snapshot.is_running,
             "state": snapshot.state,
             "message": snapshot.message,
             "screen_hint": self._get_screen_hint(snapshot.state),
@@ -657,33 +688,19 @@ class SessionController:
         }
 
     def _build_error_payload(self, code: str, message: str, state: str | None = None):
+        if state is None:
+            state = self.app_state.snapshot().state
         payload = {
             "type": "error",
             "code": code,
             "message": message,
+            "state": state,
+            "screen_hint": self._get_screen_hint(state),
         }
-        if state is not None:
-            payload["state"] = state
-            payload["screen_hint"] = self._get_screen_hint(state)
         return payload
 
     def _build_session_status_payload(self, snapshot=None):
-        if snapshot is None:
-            snapshot = self.app_state.snapshot()
-        return {
-            "type": "session_status",
-            "session_id": snapshot.session_id,
-            "is_running": snapshot.is_running,
-            "state": snapshot.state,
-            "message": snapshot.message or ("측정 대기 중입니다." if snapshot.state == SessionStatus.IDLE.value else None),
-            "screen_hint": self._get_screen_hint(snapshot.state),
-            "stage_remain_sec": snapshot.stage_remain_sec,
-            "elapsed_sec": snapshot.elapsed_sec,
-            "duration_sec": snapshot.duration_sec,
-            "remain_sec": snapshot.remain_sec,
-            "stop_reason": snapshot.stop_reason,
-            "latest_result": self._compact_latest_result(snapshot.latest_result),
-        }
+        return {"type": "session_status", **self._build_session_base_payload(snapshot)}
 
     def get_session_status_payload(self):
         return self._build_session_status_payload()
