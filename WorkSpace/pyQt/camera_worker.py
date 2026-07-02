@@ -339,6 +339,8 @@ class CameraWorker(QThread):
                 q_image = self.convert_frame_to_qimage(frame)
                 self.frame_changed.emit(q_image)
 
+                self.generate_frames(frame)
+
         except Exception as e:
             error_message = traceback.format_exc()
             print(error_message)
@@ -857,6 +859,38 @@ class CameraWorker(QThread):
             bytes_per_line,
             QImage.Format_RGB888,
         ).copy()
+    
+
+    def generate_frames(self, frame) :
+
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        try:
+            success, buffer = cv2.imencode(
+                        ".jpg",
+                        rgb_frame,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), 65]
+                    )
+            
+            if success:
+                yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n" +
+                        buffer.tobytes() +
+                        b"\r\n"
+                    )
+                
+            time.sleep(0.06)
+
+        except GeneratorExit:
+            print("클라이언트가 연결을 종료했습니다.")
+
+        except ConnectionResetError:
+            print("클라이언트 연결이 끊겼습니다.")
+
+        except BrokenPipeError:
+            print("클라이언트 파이프 연결이 끊겼습니다.")
+
 
     # ---------------------------------------------------------
     # Stop / Release
