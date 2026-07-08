@@ -109,7 +109,7 @@
 
 ### GET /network/wifi/scan
 
-WiFi 목록을 조회합니다. 현재 단계에서는 실제 WiFi 스캔을 수행하지 않고 빈 목록을 반환합니다. 실제 스캔은 라즈베리파이 배포 단계에서 구현 예정입니다.
+WiFi 목록을 조회합니다. `VPC_WIFI_MODE=dry_run`에서는 빈 목록을 반환하고, `mock`에서는 앱 UI 개발용 가짜 목록을 반환하며, `real`에서는 Raspberry Pi OS의 `nmcli`로 실제 주변 WiFi 목록을 조회합니다.
 
 ```json
 {
@@ -122,7 +122,7 @@ WiFi 목록을 조회합니다. 현재 단계에서는 실제 WiFi 스캔을 수
 
 ### POST /network/wifi/configure
 
-WiFi 설정 요청을 저장합니다. 현재 단계에서는 실제 시스템 WiFi 설정을 변경하지 않고 dry-run 상태로만 보관합니다. 응답에는 비밀번호를 절대 포함하지 않습니다.
+WiFi 설정 요청을 처리합니다. `dry_run`에서는 요청 검증과 안전한 상태 저장만 수행하고, `mock`에서는 가짜 연결 성공 응답을 반환하며, `real`에서는 `nmcli device wifi connect "<SSID>" password "<PASSWORD>"`로 실제 연결을 시도합니다. 응답에는 비밀번호를 절대 포함하지 않습니다.
 
 요청:
 
@@ -130,6 +130,19 @@ WiFi 설정 요청을 저장합니다. 현재 단계에서는 실제 시스템 W
 {
   "ssid": "MyWifi",
   "password": "mypassword123"
+}
+```
+
+`real` 모드 성공 응답 예시:
+
+```json
+{
+  "type": "wifi_configure_result",
+  "ok": true,
+  "mode": "real",
+  "ssid": "MyWifi",
+  "connected": true,
+  "message": "WiFi connected"
 }
 ```
 

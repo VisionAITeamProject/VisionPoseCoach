@@ -48,8 +48,8 @@ def create_app():
     calibration_manager = CalibrationManager(camera_manager, vision_processor)
     inference_manager = InferenceManager(camera_manager, vision_processor)
     mjpg_streamer = MjpgStreamer(camera_manager)
-    wifi_manager = WiFiManager(mode="dry_run")
-    ble_provisioning_manager = BLEProvisioningManager(wifi_manager, mode="dry_run")
+    wifi_manager = WiFiManager()
+    ble_provisioning_manager = BLEProvisioningManager(wifi_manager, mode=wifi_manager.mode)
     session_controller = SessionController(
         app_state,
         None,

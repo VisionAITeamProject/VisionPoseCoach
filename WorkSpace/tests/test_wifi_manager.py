@@ -1,4 +1,5 @@
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 
@@ -69,6 +70,104 @@ def test_mask_sensitive_data_masks_password_recursively():
 
     assert masked["password"] == "***"
     assert masked["nested"]["psk"] == "***"
+
+
+def test_mock_mode_returns_fake_networks_and_connects():
+    manager = WiFiManager(mode="mock")
+
+    scan = manager.list_networks()
+    result = manager.configure_wifi("MyWifi", "mypassword123")
+    status = manager.get_status()
+
+    assert scan["ok"] is True
+    assert scan["mode"] == "mock"
+    assert scan["networks"]
+    assert result["ok"] is True
+    assert result["connected"] is True
+    assert status["connected"] is True
+    assert status["ssid"] == "MyWifi"
+    assert not contains_key(scan, "password")
+    assert not contains_key(result, "password")
+
+
+def test_real_scan_parses_nmcli_output_without_running_shell(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(
+            returncode=0,
+            stdout="Cafe:88:WPA2\nCafe:45:WPA1 WPA2\nOpenNet:30:\n:99:WPA2\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("network.wifi_manager.subprocess.run", fake_run)
+    manager = WiFiManager(mode="real")
+
+    scan = manager.list_networks()
+
+    assert scan["ok"] is True
+    assert scan["mode"] == "real"
+    assert scan["networks"] == [
+        {"ssid": "Cafe", "signal": 88, "security": "WPA2", "secured": True},
+        {"ssid": "OpenNet", "signal": 30, "security": "", "secured": False},
+    ]
+    assert calls[0][0] == [
+        "nmcli",
+        "-t",
+        "-f",
+        "SSID,SIGNAL,SECURITY",
+        "device",
+        "wifi",
+        "list",
+        "--rescan",
+        "yes",
+    ]
+    assert calls[0][1]["shell"] is False
+
+
+def test_real_configure_sanitizes_nmcli_failure(monkeypatch):
+    def fake_run(command, **kwargs):
+        return SimpleNamespace(
+            returncode=10,
+            stdout="",
+            stderr="failed to connect with password supersecret",
+        )
+
+    monkeypatch.setattr("network.wifi_manager.subprocess.run", fake_run)
+    manager = WiFiManager(mode="real")
+
+    result = manager.configure_wifi("MyWifi", "supersecret")
+
+    assert result["ok"] is False
+    assert result["connected"] is False
+    assert "supersecret" not in str(result)
+    assert result["message"] == "failed to connect with password ***"
+    assert not contains_key(result, "password")
+
+
+def test_real_scan_returns_friendly_nmcli_missing_error(monkeypatch):
+    def fake_run(command, **kwargs):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr("network.wifi_manager.subprocess.run", fake_run)
+    manager = WiFiManager(mode="real")
+
+    scan = manager.list_networks()
+
+    assert scan["ok"] is False
+    assert scan["networks"] == []
+    assert "nmcli" in scan["message"]
+
+
+def test_missing_ssid_validation_error():
+    manager = WiFiManager()
+
+    result = manager.configure_wifi("", "mypassword123")
+
+    assert result["ok"] is False
+    assert result["message"] == "SSID가 올바르지 않습니다."
+    assert not contains_key(result, "password")
 
 
 def test_health_contract_includes_network_app_fields():

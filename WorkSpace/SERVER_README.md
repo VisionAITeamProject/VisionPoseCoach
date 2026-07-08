@@ -1,7 +1,7 @@
 # VisionPoseCoach Server Stage 1
 
 This is the server skeleton for smartphone app integration.
-It includes the FastAPI app, camera stream, session API, WebSocket session messages, and a dry-run WiFiManager structure for future provisioning.
+It includes the FastAPI app, camera stream, session API, WebSocket session messages, and WiFi provisioning modes for app development and Raspberry Pi testing.
 
 ## Install
 
@@ -16,6 +16,20 @@ Run from the `WorkSpace` directory:
 ```bash
 cd /home/pi/VisionPoseCoach/WorkSpace
 python server_main.py
+```
+
+WiFi mode is selected with `VPC_WIFI_MODE`. The safe default is `dry_run`.
+
+App UI development mock mode:
+
+```bash
+VPC_WIFI_MODE=mock python server_main.py
+```
+
+Raspberry Pi real WiFi mode:
+
+```bash
+VPC_WIFI_MODE=real python server_main.py
 ```
 
 Or:
@@ -39,9 +53,9 @@ python server_main.py
 - `GET /session/status`: app-facing session snapshot
 - `GET /session/latest-report`: latest finished session report
 - `GET /session/report/{session_id}`: report lookup by session id
-- `GET /network/status`: current dry-run network/WiFi status
-- `GET /network/wifi/scan`: dry-run WiFi scan response
-- `POST /network/wifi/configure`: store a WiFi configuration request without changing OS WiFi settings
+- `GET /network/status`: current network/WiFi status
+- `GET /network/wifi/scan`: WiFi scan response for the selected mode
+- `POST /network/wifi/configure`: configure WiFi for the selected mode
 - `POST /network/wifi/forget`: clear the stored dry-run WiFi configuration request
 - `GET /provisioning/ble/status`: current dry-run BLE provisioning status
 - `GET /provisioning/status`: app-facing combined device registration status
@@ -63,7 +77,7 @@ WebSocket command examples:
 
 ## Network / WiFi Development API
 
-`network/wifi_manager.py` currently runs in `dry_run` mode. It validates WiFi configuration requests and stores only safe state such as `last_configured_ssid`.
+`network/wifi_manager.py` supports three modes. The mode is read from `VPC_WIFI_MODE`, with `dry_run` as the default.
 
 Important legacy note:
 
@@ -72,13 +86,24 @@ Important legacy note:
 - The legacy file may contain real OS WiFi commands such as `nmcli` or `sudo nmcli`, so do not import or execute it from the current app integration path.
 - Future real WiFi connection support should extend the `real` mode inside `network/wifi_manager.py` instead.
 
+- `dry_run`: validates WiFi configuration requests and stores only safe state such as `last_configured_ssid`. No OS WiFi command is executed.
+- `mock`: returns fake WiFi scan data and fake successful connection responses for Flutter UI development.
+- `real`: uses `nmcli` on Raspberry Pi OS to scan, connect, and read WiFi status.
+
+Real mode uses these commands without `shell=True`:
+
+```bash
+nmcli -t -f SSID,SIGNAL,SECURITY device wifi list --rescan yes
+nmcli device wifi connect "<SSID>" password "<PASSWORD>"
+nmcli -t -f ACTIVE,SSID dev wifi
+hostname -I
+```
+
 Current behavior:
 
-- No `nmcli`, `wpa_cli`, `raspi-config`, `systemctl`, or other OS WiFi command is executed.
-- Real WiFi scanning is not performed yet; `/network/wifi/scan` returns an empty list with a dry-run message.
 - WiFi passwords are not returned by API responses and are not included in `/health` debug output.
 - In dry-run mode, `/health.app.network_ready` may be `true` for development even when `wifi_connected=false`.
-- Real Raspberry Pi deployment can later replace the dry-run internals with an `nmcli` or `wpa_supplicant` based implementation.
+- If `nmcli` is missing or a command fails, the API returns `ok=false` with a friendly message and without exposing the password.
 
 WiFi configure example:
 
@@ -101,9 +126,21 @@ Expected dry-run response:
 }
 ```
 
+API test examples:
+
+```bash
+curl http://localhost:8000/network/status
+
+curl http://localhost:8000/network/wifi/scan
+
+curl -X POST http://localhost:8000/network/wifi/configure \
+  -H "Content-Type: application/json" \
+  -d '{"ssid":"MyWifi","password":"my-password"}'
+```
+
 ## BLE Provisioning Development API
 
-`network/ble_provisioning_manager.py` currently runs in `dry_run` mode. BLE is only for initial device setup. Realtime measurement uses WiFi-based HTTP, WebSocket, and MJPG endpoints.
+`network/ble_provisioning_manager.py` mirrors the selected WiFi mode. BLE is only for initial device setup. Realtime measurement uses WiFi-based HTTP, WebSocket, and MJPG endpoints.
 
 Current behavior:
 
