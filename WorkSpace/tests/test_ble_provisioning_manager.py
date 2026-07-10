@@ -29,6 +29,11 @@ def test_ble_initial_status():
 
     assert status["mode"] == "dry_run"
     assert status["available"] is False
+    assert status["implementation"] == "http_mock"
+    assert status["transport"] == "http"
+    assert status["mock_available"] is True
+    assert status["real_ble"] is False
+    assert status["gatt_available"] is False
     assert status["advertising"] is False
     assert status["device_name"] == "VisionPoseCoach-Pi"
     assert status["pairing_code"] == "123456"
@@ -144,7 +149,24 @@ def test_registration_status_includes_ble_wifi_and_next_step():
     assert response["next_step"] == "WAIT_FOR_APP"
     assert "ble" in response
     assert "wifi" in response
+    assert response["ble"]["implementation"] == "http_mock"
+    assert response["ble"]["real_ble"] is False
+    assert response["ble"]["gatt_available"] is False
     assert not contains_key(response, "password")
+
+
+def test_ble_manager_status_identifies_http_mock_not_real_ble():
+    manager, _ = make_manager()
+
+    status = manager.get_status()
+    registration = manager.get_registration_status()
+
+    assert status["implementation"] == "http_mock"
+    assert status["real_ble"] is False
+    assert status["gatt_available"] is False
+    assert registration["ble"]["implementation"] == "http_mock"
+    assert registration["ble"]["real_ble"] is False
+    assert registration["ble"]["gatt_available"] is False
 
 
 def test_health_contract_includes_ble_app_fields():

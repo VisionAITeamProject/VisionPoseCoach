@@ -24,6 +24,9 @@ def main():
     status = manager.get_status()
     assert status["mode"] == "dry_run"
     assert status["available"] is False
+    assert status["implementation"] == "http_mock"
+    assert status["real_ble"] is False
+    assert status["gatt_available"] is False
     assert status["advertising"] is False
     assert status["provisioning_state"] == "NOT_STARTED"
 

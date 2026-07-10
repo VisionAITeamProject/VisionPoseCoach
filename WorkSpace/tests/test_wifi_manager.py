@@ -126,6 +126,26 @@ def test_real_scan_parses_nmcli_output_without_running_shell(monkeypatch):
     assert calls[0][1]["shell"] is False
 
 
+def test_real_scan_parses_nmcli_escaped_colon_ssid(monkeypatch):
+    def fake_run(command, **kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout="Cafe\\:Main:77:WPA2\nStudio\\\\AP:50:--\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("network.wifi_manager.subprocess.run", fake_run)
+    manager = WiFiManager(mode="real")
+
+    scan = manager.list_networks()
+
+    assert scan["ok"] is True
+    assert scan["networks"] == [
+        {"ssid": "Cafe:Main", "signal": 77, "security": "WPA2", "secured": True},
+        {"ssid": "Studio\\AP", "signal": 50, "security": "--", "secured": False},
+    ]
+
+
 def test_real_configure_sanitizes_nmcli_failure(monkeypatch):
     def fake_run(command, **kwargs):
         return SimpleNamespace(

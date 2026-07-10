@@ -2,6 +2,13 @@ from threading import Lock
 
 
 class BLEProvisioningManager:
+    """HTTP mock state manager for the future BLE WiFi provisioning flow.
+
+    This class does not start Bluetooth advertising or expose GATT services.
+    The /provisioning/ble/* API uses it to test the app/server provisioning
+    contract before the Raspberry Pi BLE peripheral implementation exists.
+    """
+
     STATE_NOT_STARTED = "NOT_STARTED"
     STATE_ADVERTISING = "ADVERTISING"
     STATE_CLIENT_CONNECTED = "CLIENT_CONNECTED"
@@ -44,7 +51,12 @@ class BLEProvisioningManager:
         with self._lock:
             return {
                 "mode": self.mode,
-                "available": False if self.mode == "dry_run" else True,
+                "implementation": "http_mock",
+                "transport": "http",
+                "available": False,
+                "mock_available": True,
+                "real_ble": False,
+                "gatt_available": False,
                 "advertising": self._advertising,
                 "device_name": self.device_name,
                 "pairing_code": self._pairing_code,
@@ -66,6 +78,11 @@ class BLEProvisioningManager:
             "provisioning_completed": status["provisioning_completed"],
             "ble": {
                 "available": status["available"],
+                "implementation": status["implementation"],
+                "transport": status["transport"],
+                "mock_available": status["mock_available"],
+                "real_ble": status["real_ble"],
+                "gatt_available": status["gatt_available"],
                 "advertising": status["advertising"],
                 "last_client_id": status["last_client_id"],
                 "last_message_type": status["last_message_type"],
@@ -87,7 +104,7 @@ class BLEProvisioningManager:
             "ok": True,
             "ble": self.get_status(),
             "next_step": self.NEXT_WAIT_FOR_APP,
-            "message": "BLE advertising을 dry-run 상태로 시작했습니다.",
+            "message": "HTTP mock BLE provisioning advertising 상태를 시작했습니다. 실제 BLE advertising은 아직 수행하지 않습니다.",
         }
 
     def stop_advertising(self):
@@ -102,7 +119,7 @@ class BLEProvisioningManager:
             "ok": True,
             "ble": self.get_status(),
             "next_step": self._next_step(self.get_status()["provisioning_state"]),
-            "message": "BLE advertising을 dry-run 상태로 중지했습니다.",
+            "message": "HTTP mock BLE provisioning advertising 상태를 중지했습니다. 실제 BLE advertising은 아직 수행하지 않습니다.",
         }
 
     def handle_provisioning_message(self, payload):

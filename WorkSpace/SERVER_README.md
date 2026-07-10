@@ -32,6 +32,15 @@ Raspberry Pi real WiFi mode:
 VPC_WIFI_MODE=real python server_main.py
 ```
 
+Before using `real` mode in the full server, you can run the focused Raspberry Pi verification script:
+
+```bash
+python tools/verify_real_wifi.py
+python tools/verify_real_wifi.py --connect --ssid "MyWifi" --password "my-password"
+```
+
+The first command checks status and scans nearby WiFi networks only. It does not connect. The second command attempts a connection, and the script never prints the password.
+
 Or:
 
 ```bash
@@ -84,11 +93,11 @@ Important legacy note:
 - The FastAPI server uses `network/wifi_manager.py`.
 - The root-level `wifi_manager.py` is a legacy/experimental file and is not used by the current server.
 - The legacy file may contain real OS WiFi commands such as `nmcli` or `sudo nmcli`, so do not import or execute it from the current app integration path.
-- Future real WiFi connection support should extend the `real` mode inside `network/wifi_manager.py` instead.
+- Current real WiFi connection support is implemented in the `real` mode inside `network/wifi_manager.py`; it still needs validation on the target Raspberry Pi OS image with `nmcli`.
 
 - `dry_run`: validates WiFi configuration requests and stores only safe state such as `last_configured_ssid`. No OS WiFi command is executed.
 - `mock`: returns fake WiFi scan data and fake successful connection responses for Flutter UI development.
-- `real`: uses `nmcli` on Raspberry Pi OS to scan, connect, and read WiFi status.
+- `real`: uses `nmcli` on Raspberry Pi OS to scan, connect, and read WiFi status. This code path is implemented, but must be verified on the actual Raspberry Pi before treating it as production-ready.
 
 Real mode uses these commands without `shell=True`:
 
@@ -104,6 +113,7 @@ Current behavior:
 - WiFi passwords are not returned by API responses and are not included in `/health` debug output.
 - In dry-run mode, `/health.app.network_ready` may be `true` for development even when `wifi_connected=false`.
 - If `nmcli` is missing or a command fails, the API returns `ok=false` with a friendly message and without exposing the password.
+- `tools/verify_real_wifi.py` prints a NetworkManager/nmcli hint when `nmcli` is missing.
 
 WiFi configure example:
 
@@ -142,11 +152,21 @@ curl -X POST http://localhost:8000/network/wifi/configure \
 
 `network/ble_provisioning_manager.py` mirrors the selected WiFi mode. BLE is only for initial device setup. Realtime measurement uses WiFi-based HTTP, WebSocket, and MJPG endpoints.
 
+Important current-state note:
+
+- `network/ble_provisioning_manager.py` is an HTTP mock provisioning state manager, not a real BLE implementation.
+- `/provisioning/ble/*` endpoints are not real BLE. They are mock/debug HTTP APIs for testing the app/server flow before GATT exists.
+- Real BLE implementation must make the Raspberry Pi advertise as `VisionPoseCoach-Pi`.
+- The Flutter app must find `VisionPoseCoach-Pi` through BLE scan and send SSID/password through a GATT characteristic write.
+- BLE payloads must ultimately route to `WiFiManager.configure_wifi(ssid, password)`.
+- The next GATT contract is documented in `BLE_GATT_SPEC.md`.
+
 Current behavior:
 
 - No `bluetoothctl`, `hciconfig`, `rfkill`, `dbus-send`, `systemctl`, or other Bluetooth system command is executed.
 - Real BLE advertising, pairing, and characteristic writes are not performed yet.
 - `/provisioning/ble/message` is an HTTP mock for the payloads that will later arrive through BLE.
+- BLE status includes `implementation=http_mock`, `real_ble=false`, and `gatt_available=false` until the real GATT server is implemented.
 - The BLE manager receives `configure_wifi` messages and calls `WiFiManager.configure_wifi(ssid, password)`.
 - WiFi passwords are not stored in BLE manager state and are not returned by responses or `/health` debug output.
 - Future real BLE support can be implemented with a Raspberry Pi compatible BLE stack such as BlueZ/DBus, `bleak`, or `bless`.

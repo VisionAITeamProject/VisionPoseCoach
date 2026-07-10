@@ -315,7 +315,7 @@ class WiFiManager:
         if not line or not line.strip():
             return None
 
-        parts = line.split(":", 2)
+        parts = self._split_nmcli_terse_line(line, expected_fields=3)
         if len(parts) < 3:
             return None
 
@@ -336,6 +336,34 @@ class WiFiManager:
             "security": security,
             "secured": secured,
         }
+
+    def _split_nmcli_terse_line(self, line, expected_fields):
+        parts = []
+        current = []
+        escaped = False
+
+        for char in line:
+            if escaped:
+                current.append(char)
+                escaped = False
+                continue
+
+            if char == "\\":
+                escaped = True
+                continue
+
+            if char == ":" and len(parts) < expected_fields - 1:
+                parts.append("".join(current))
+                current = []
+                continue
+
+            current.append(char)
+
+        if escaped:
+            current.append("\\")
+
+        parts.append("".join(current))
+        return parts
 
     def _run_nmcli(self, command):
         try:

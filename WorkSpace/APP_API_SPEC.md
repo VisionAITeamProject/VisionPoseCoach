@@ -52,7 +52,7 @@
 ```
 
 `network_ready`는 앱 통신에 필요한 네트워크 상태가 준비되었는지 나타냅니다. 현재 dry-run 개발 모드에서는 실제 WiFi 연결을 변경하지 않으므로 개발 편의를 위해 `true`가 될 수 있습니다. `wifi_connected`는 WiFi 연결 여부이고, `provisioning_required`는 앱에서 WiFi 설정 화면을 보여줘야 하는지 판단할 때 사용합니다.
-`provisioning_state`는 앱의 기기 등록 진행 상태입니다. `ble_available`은 실제 BLE 사용 가능 여부이고, dry-run 모드에서는 `false`입니다. `ble_advertising`은 BLE advertising 상태이며 현재 단계에서는 실제 광고 없이 상태값만 바뀝니다. `pairing_code`는 앱용 `app` 섹션에 넣지 않고 provisioning 전용 응답 또는 개발 확인용 `debug.provisioning`에서만 확인합니다.
+`provisioning_state`는 앱의 기기 등록 진행 상태입니다. `ble_available`은 실제 BLE GATT 사용 가능 여부이고, 현재 HTTP mock 단계에서는 모드와 관계없이 `false`입니다. `ble_advertising`은 mock advertising 상태이며 현재 단계에서는 실제 광고 없이 상태값만 바뀝니다. `pairing_code`는 앱용 `app` 섹션에 넣지 않고 provisioning 전용 응답 또는 개발 확인용 `debug.provisioning`에서만 확인합니다.
 
 ### GET /session/status
 
@@ -158,6 +158,8 @@ WiFi 설정 요청을 처리합니다. `dry_run`에서는 요청 검증과 안�
 }
 ```
 
+위 dry-run 응답의 “실제 연결 변경은 배포 단계에서 구현됩니다” 문구는 dry-run 모드에만 해당합니다. 코드상 `real` 모드는 `nmcli` 기반 scan/connect/status가 구현되어 있으며, 실제 Raspberry Pi 환경에서 NetworkManager/nmcli로 검증해야 합니다.
+
 ### POST /network/wifi/forget
 
 저장된 WiFi 설정 요청 상태를 초기화합니다.
@@ -172,7 +174,7 @@ WiFi 설정 요청을 처리합니다. `dry_run`에서는 요청 검증과 안�
 
 ### GET /provisioning/ble/status
 
-BLE Provisioning 상태를 조회합니다. 현재 단계에서는 실제 Bluetooth 하드웨어 제어 없이 dry-run 상태만 반환합니다.
+BLE Provisioning 상태를 조회합니다. 현재 단계에서는 실제 Bluetooth 하드웨어 제어 없이 HTTP mock 상태만 반환합니다. `/provisioning/ble/*`는 실제 BLE가 아닙니다.
 
 ```json
 {
@@ -180,6 +182,11 @@ BLE Provisioning 상태를 조회합니다. 현재 단계에서는 실제 Blueto
   "ble": {
     "mode": "dry_run",
     "available": false,
+    "implementation": "http_mock",
+    "transport": "http",
+    "mock_available": true,
+    "real_ble": false,
+    "gatt_available": false,
     "advertising": false,
     "device_name": "VisionPoseCoach-Pi",
     "pairing_code": "123456",
@@ -193,7 +200,7 @@ BLE Provisioning 상태를 조회합니다. 현재 단계에서는 실제 Blueto
 
 ### POST /provisioning/ble/start
 
-dry-run advertising 상태를 시작합니다. 실제 BLE advertising은 수행하지 않습니다.
+HTTP mock advertising 상태를 시작합니다. 실제 BLE advertising은 수행하지 않습니다.
 
 ```json
 {
@@ -208,11 +215,11 @@ dry-run advertising 상태를 시작합니다. 실제 BLE advertising은 수행�
 
 ### POST /provisioning/ble/stop
 
-dry-run advertising 상태를 중지합니다.
+HTTP mock advertising 상태를 중지합니다.
 
 ### POST /provisioning/ble/message
 
-실제 BLE characteristic write로 들어올 provisioning 메시지를 HTTP로 mock 처리합니다. 개발/테스트용 API이며, 제품 흐름에서는 추후 BLE characteristic write로 대체됩니다.
+실제 BLE characteristic write로 들어올 provisioning 메시지를 HTTP로 mock 처리합니다. 개발/테스트용 API이며, 제품 흐름에서는 추후 BLE characteristic write로 대체됩니다. password는 응답에 포함하지 않습니다.
 
 ### POST /provisioning/ble/reset
 
@@ -423,6 +430,10 @@ WebSocket 연결 직후 1회 전송됩니다. 앱 재접속 시 현재 상태를
 
 BLE Provisioning은 초기 설정에서 앱이 라즈베리파이를 발견하고 WiFi 정보를 전달하기 위한 통로입니다. 측정 화면에서는 BLE를 사용하지 않고 `/session/status`, `/mjpg`, `/ws`를 사용합니다.
 
+현재 구현은 실제 BLE가 아니라 HTTP mock provisioning입니다. Raspberry Pi는 아직 BLE peripheral로 advertising하지 않으며, GATT service/characteristic도 열지 않습니다. 실제 BLE 단계에서는 Flutter 앱이 BLE scan으로 `VisionPoseCoach-Pi`를 찾고, GATT characteristic write로 SSID/password를 보내야 합니다. Raspberry Pi 쪽 BLE 서버는 수신 payload를 검증한 뒤 최종적으로 `WiFiManager.configure_wifi(ssid, password)`를 호출해야 합니다.
+
+다음 단계 GATT 스펙은 `BLE_GATT_SPEC.md`에 정리되어 있습니다.
+
 Provisioning 상태값:
 
 | provisioning_state | 의미 |
@@ -599,7 +610,7 @@ Provisioning 상태값:
 ### A. 최초 기기 등록
 
 1. 앱에서 기기 추가 선택
-2. BLE로 `VisionPoseCoach-Pi` 검색
+2. 실제 BLE 단계에서는 BLE로 `VisionPoseCoach-Pi` 검색
 3. 사용자가 기기 선택
 4. 앱이 `hello` 메시지 전송
 5. 서버 응답 `next_step=SEND_WIFI_CONFIG` 확인
@@ -612,7 +623,7 @@ Provisioning 상태값:
 12. 기기 IP 저장
 13. 홈 또는 측정 준비 화면으로 이동
 
-이번 단계에서는 실제 BLE advertising, pairing, characteristic write와 실제 OS WiFi 변경을 구현하지 않습니다. FastAPI HTTP mock API로 `BLEProvisioningManager`와 `WiFiManager` 연동 구조를 먼저 검증합니다.
+이번 단계에서는 실제 BLE advertising, pairing, characteristic write를 구현하지 않습니다. FastAPI HTTP mock API로 `BLEProvisioningManager`와 `WiFiManager` 연동 구조를 먼저 검증합니다. WiFi는 코드상 `real` 모드에 `nmcli` 기반 실제 scan/connect/status가 구현되어 있으며, 실제 Raspberry Pi 환경에서 검증해야 합니다. 앱 UI 개발에는 `mock` 모드를 사용하고, 안전한 기본값은 `dry_run`입니다.
 
 ### B. 앱 재실행
 
