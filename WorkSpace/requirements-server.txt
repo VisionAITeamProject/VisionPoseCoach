@@ -5,3 +5,4 @@ numpy
 joblib
 mediapipe
 scikit-learn
+dbus-next>=0.2.3,<1

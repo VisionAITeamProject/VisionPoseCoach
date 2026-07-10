@@ -1,14 +1,15 @@
 # VisionPoseCoach BLE GATT Provisioning Spec
 
-This document defines the next implementation target for real Raspberry Pi BLE provisioning.
-The current `/provisioning/ble/*` FastAPI endpoints are HTTP mock/debug APIs only. They do not perform BLE advertising, pairing, or GATT characteristic reads/writes.
+This document defines the implemented Raspberry Pi BLE provisioning contract.
+The `/provisioning/ble/*` FastAPI endpoints remain HTTP mock/debug APIs only. Real advertising and GATT are provided by `network/ble_gatt_server.py` and `tools/run_ble_gatt_server.py`.
 
 ## Current State
 
-- `network/ble_provisioning_manager.py` is an HTTP mock provisioning state manager.
+- `network/ble_provisioning_manager.py` validates payloads, owns provisioning state, and calls the shared `WiFiManager`; FastAPI also uses it for its HTTP mock.
+- `network/ble_gatt_server.py` registers a real BlueZ GATT application and LE advertisement through the system D-Bus.
 - `/provisioning/ble/*` is not real BLE.
-- The HTTP mock exists so the Flutter app and FastAPI server can test the provisioning flow before the BLE peripheral is implemented.
-- In the real BLE stage, Raspberry Pi must advertise as a BLE peripheral.
+- The HTTP mock exists so the Flutter app and FastAPI server can test the provisioning flow without BLE hardware.
+- The real BlueZ implementation exists in code, but still requires Raspberry Pi hardware verification.
 - The Flutter app must scan for `VisionPoseCoach-Pi` and write WiFi credentials through a GATT characteristic.
 - The payload received over BLE must ultimately call `WiFiManager.configure_wifi(ssid, password)`.
 - Passwords must never be included in responses, logs, status payloads, or debug output.
@@ -28,17 +29,11 @@ Use these UUIDs as the initial implementation contract. They can be changed befo
 | Provisioning Service | `9f4c0001-7d9a-4b57-9d9f-000000000001` | Primary service |
 | WiFi Configure Characteristic | `9f4c0002-7d9a-4b57-9d9f-000000000002` | Write |
 | Status Characteristic | `9f4c0003-7d9a-4b57-9d9f-000000000003` | Read, Notify |
-| Optional Pairing/Hello Characteristic | `9f4c0004-7d9a-4b57-9d9f-000000000004` | Write, Read |
+| Hello / Device Info Characteristic | `9f4c0004-7d9a-4b57-9d9f-000000000004` | Read |
 
-## App To Pi: Hello Payload
+## Pi To App: Hello / Device Info
 
-```json
-{
-  "type": "hello",
-  "client_id": "phone-001",
-  "app_version": "0.1.0"
-}
-```
+Hello / Device Info is read-only. The app does not write a hello JSON. Reading it returns compact UTF-8 JSON containing `type=device_info`, `device_name`, and `service_uuid`.
 
 ## App To Pi: WiFi Configure Payload
 
@@ -56,7 +51,7 @@ Write this JSON to the WiFi Configure Characteristic.
 Validation rules:
 
 - `ssid` is required and must be 32 bytes or less.
-- `password` is required for secured networks and must not be logged.
+- `password` is currently required by `WiFiManager` (8–63 characters) and must not be logged.
 - The server must call `WiFiManager.configure_wifi(ssid, password)`.
 - The server must mask or omit `password` before storing any state or returning any status.
 
@@ -88,14 +83,35 @@ Failure example:
 }
 ```
 
-The response must not include `password`.
+The response must not include `password`. The compact real-GATT status shape is:
+
+```json
+{"mode":"real_ble","device_name":"VisionPoseCoach-Pi","state":"ADVERTISING","wifi_connected":false,"ssid":null,"last_error":null}
+```
+
+Real GATT state values are `IDLE`, `ADVERTISING`, `CONNECTED`, `WIFI_CONFIGURING`, `WIFI_CONNECTED`, and `FAILED`.
+
+## Flutter Flow
+
+1. Scan for the local name `VisionPoseCoach-Pi` (also match the service UUID).
+2. Connect and discover the provisioning service.
+3. Read Hello / Device Info and verify the device name.
+4. Subscribe to Status notifications, then read Status once.
+5. UTF-8 encode the configure JSON and write it to WiFi Configure.
+6. Wait for `WIFI_CONNECTED`; on failure display `last_error` and allow retry.
+7. Disconnect BLE and verify `/network/status` or `/health` over Wi-Fi.
+8. Use HTTP/WebSocket/MJPG over Wi-Fi for all measurement traffic.
+
+## Write Size Limitation
+
+The server accepts one complete UTF-8 JSON write of at most 512 bytes. Application-level chunk reassembly is not implemented. Flutter should use a write-with-response/long-write facility when its platform MTU requires it; otherwise keep SSID, client ID, and password compact. A partial JSON write is rejected without retaining credentials.
 
 ## Implementation Notes
 
 1. Start a BLE peripheral named `VisionPoseCoach-Pi`.
 2. Advertise the Provisioning Service UUID.
-3. Accept `hello` and `configure_wifi` JSON writes from the Flutter app.
-4. Reuse the existing `BLEProvisioningManager.handle_provisioning_message(payload)` logic where possible.
+3. Expose Hello / Device Info as read-only and accept only `configure_wifi` JSON on the configure characteristic.
+4. Reuse `BLEProvisioningManager.handle_gatt_configure(payload)` for validation and state handling.
 5. Route WiFi credentials to `WiFiManager.configure_wifi(ssid, password)`.
 6. Notify the Status Characteristic when provisioning state changes.
 7. After WiFi configuration, the app should check `/network/status` or `/health` over WiFi.

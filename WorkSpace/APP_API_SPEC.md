@@ -219,7 +219,7 @@ HTTP mock advertising 상태를 중지합니다.
 
 ### POST /provisioning/ble/message
 
-실제 BLE characteristic write로 들어올 provisioning 메시지를 HTTP로 mock 처리합니다. 개발/테스트용 API이며, 제품 흐름에서는 추후 BLE characteristic write로 대체됩니다. password는 응답에 포함하지 않습니다.
+실제 BLE Configure characteristic과 같은 provisioning payload를 HTTP로 mock 처리합니다. 개발/테스트용 API이며 실제 제품의 Bluetooth 전송 경로는 별도 GATT 서버가 담당합니다. password는 응답에 포함하지 않습니다.
 
 ### POST /provisioning/ble/reset
 
@@ -430,9 +430,9 @@ WebSocket 연결 직후 1회 전송됩니다. 앱 재접속 시 현재 상태를
 
 BLE Provisioning은 초기 설정에서 앱이 라즈베리파이를 발견하고 WiFi 정보를 전달하기 위한 통로입니다. 측정 화면에서는 BLE를 사용하지 않고 `/session/status`, `/mjpg`, `/ws`를 사용합니다.
 
-현재 구현은 실제 BLE가 아니라 HTTP mock provisioning입니다. Raspberry Pi는 아직 BLE peripheral로 advertising하지 않으며, GATT service/characteristic도 열지 않습니다. 실제 BLE 단계에서는 Flutter 앱이 BLE scan으로 `VisionPoseCoach-Pi`를 찾고, GATT characteristic write로 SSID/password를 보내야 합니다. Raspberry Pi 쪽 BLE 서버는 수신 payload를 검증한 뒤 최종적으로 `WiFiManager.configure_wifi(ssid, password)`를 호출해야 합니다.
+`/provisioning/ble/*` API는 계속 HTTP mock provisioning이며 실제 Bluetooth 통신이 아닙니다. 실제 Raspberry Pi peripheral/GATT 구현은 `network/ble_gatt_server.py`에 있고 `tools/run_ble_gatt_server.py`로 별도 실행합니다. Flutter 앱은 BLE scan으로 `VisionPoseCoach-Pi`를 찾고 GATT characteristic write로 SSID/password를 보냅니다. Raspberry Pi BLE 서버는 payload를 검증한 뒤 기존 `WiFiManager.configure_wifi(ssid, password)`를 호출합니다. Wi-Fi 연결 이후 측정 통신은 BLE가 아닌 HTTP/WebSocket/MJPG를 사용합니다.
 
-다음 단계 GATT 스펙은 `BLE_GATT_SPEC.md`에 정리되어 있습니다.
+현재 GATT 스펙은 `BLE_GATT_SPEC.md`에 정리되어 있습니다. FastAPI와 실제 GATT 서버는 별도 프로세스이므로 `/provisioning/ble/status`는 실행 중인 GATT 서버 상태를 직접 반영하지 않습니다.
 
 Provisioning 상태값:
 
@@ -440,7 +440,7 @@ Provisioning 상태값:
 | --- | --- |
 | `NOT_STARTED` | 기기 등록 흐름이 시작되지 않음 |
 | `ADVERTISING` | 앱의 BLE 발견을 기다리는 중 |
-| `CLIENT_CONNECTED` | 앱이 hello 메시지로 기기와 연결됨 |
+| `CLIENT_CONNECTED` | HTTP mock의 기존 hello 흐름 또는 향후 연결 감지용 상태 |
 | `WIFI_CONFIG_RECEIVED` | WiFi 설정 요청을 받음 |
 | `WIFI_CONFIGURED` | WiFi 설정 요청 처리 완료 상태로 확장 가능 |
 | `COMPLETED` | dry-run에서 WiFi 설정 요청 처리 완료 |
@@ -451,13 +451,15 @@ Provisioning 상태값:
 | next_step | 앱 동작 |
 | --- | --- |
 | `START_BLE_ADVERTISING` | 서버의 BLE advertising 시작을 유도 |
-| `WAIT_FOR_APP` | 앱이 기기를 선택하고 hello를 보낼 때까지 대기 |
+| `WAIT_FOR_APP` | 앱이 기기를 선택하고 GATT service를 탐색할 때까지 대기 |
 | `SEND_WIFI_CONFIG` | 앱에서 WiFi SSID/PW 입력 화면 표시 |
 | `CHECK_NETWORK_STATUS` | `/network/status` 또는 `/health`로 연결 상태 확인 |
 | `READY_TO_REGISTER` | 기기 등록 완료 처리 가능 |
 | `ERROR` | WiFi 정보 재입력 또는 등록 재시도 |
 
-### hello
+### hello — HTTP mock 전용
+
+아래 hello write 메시지는 `/provisioning/ble/message`의 기존 HTTP mock 호환용입니다. 실제 GATT에서는 Hello / Device Info characteristic이 read-only이며 앱이 hello JSON을 write하지 않습니다.
 
 앱 → 라즈베리파이:
 
@@ -610,20 +612,18 @@ Provisioning 상태값:
 ### A. 최초 기기 등록
 
 1. 앱에서 기기 추가 선택
-2. 실제 BLE 단계에서는 BLE로 `VisionPoseCoach-Pi` 검색
+2. BLE로 `VisionPoseCoach-Pi` 검색
 3. 사용자가 기기 선택
-4. 앱이 `hello` 메시지 전송
-5. 서버 응답 `next_step=SEND_WIFI_CONFIG` 확인
-6. `pairing_code` 확인
-7. 앱에서 WiFi SSID/PW 입력 화면 표시
-8. 앱이 `configure_wifi` 메시지 전송
-9. 서버 응답 `provisioning_state=COMPLETED`, `next_step=CHECK_NETWORK_STATUS` 확인
-10. 앱이 `/provisioning/status` 또는 `/network/status` 호출
-11. `network_ready` 또는 `wifi_connected` 상태 확인
-12. 기기 IP 저장
-13. 홈 또는 측정 준비 화면으로 이동
+4. provisioning service 탐색
+5. Hello / Device Info characteristic read
+6. Status characteristic notify 구독 후 현재 상태 read
+7. WiFi SSID/password 입력 후 Configure characteristic write
+8. `WIFI_CONNECTED` 또는 `FAILED` 확인
+9. BLE 연결 해제
+10. `/network/status` 또는 `/health`로 WiFi 통신 확인
+11. 홈 또는 측정 준비 화면으로 이동
 
-이번 단계에서는 실제 BLE advertising, pairing, characteristic write를 구현하지 않습니다. FastAPI HTTP mock API로 `BLEProvisioningManager`와 `WiFiManager` 연동 구조를 먼저 검증합니다. WiFi는 코드상 `real` 모드에 `nmcli` 기반 실제 scan/connect/status가 구현되어 있으며, 실제 Raspberry Pi 환경에서 검증해야 합니다. 앱 UI 개발에는 `mock` 모드를 사용하고, 안전한 기본값은 `dry_run`입니다.
+BlueZ 기반 실제 advertising/GATT 코드는 구현되어 있지만 Raspberry Pi 하드웨어 검증은 아직 필요합니다. FastAPI HTTP mock API는 앱 UI와 payload 흐름 테스트용으로 유지합니다. WiFi `real` 모드는 `nmcli` 기반 실제 scan/connect/status를 수행하므로 실제 네트워크가 변경될 수 있습니다. 앱 UI 개발에는 `mock`, 안전한 기본값에는 `dry_run`을 사용합니다.
 
 ### B. 앱 재실행
 

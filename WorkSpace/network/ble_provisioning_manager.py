@@ -17,6 +17,15 @@ class BLEProvisioningManager:
     STATE_COMPLETED = "COMPLETED"
     STATE_ERROR = "ERROR"
 
+    # Real GATT-facing state names.  The legacy HTTP mock state names above
+    # remain part of the existing FastAPI contract.
+    BLE_STATE_IDLE = "IDLE"
+    BLE_STATE_ADVERTISING = "ADVERTISING"
+    BLE_STATE_CONNECTED = "CONNECTED"
+    BLE_STATE_WIFI_CONFIGURING = "WIFI_CONFIGURING"
+    BLE_STATE_WIFI_CONNECTED = "WIFI_CONNECTED"
+    BLE_STATE_FAILED = "FAILED"
+
     NEXT_START_BLE_ADVERTISING = "START_BLE_ADVERTISING"
     NEXT_WAIT_FOR_APP = "WAIT_FOR_APP"
     NEXT_SEND_WIFI_CONFIG = "SEND_WIFI_CONFIG"
@@ -45,6 +54,36 @@ class BLEProvisioningManager:
         self._provisioning_state = self.STATE_NOT_STARTED
         self._provisioning_completed = False
         self._last_error = None
+
+    def validate_configure_payload(self, payload):
+        """Validate a GATT configure write without retaining credentials."""
+        if not isinstance(payload, dict):
+            return {"ok": False, "error_code": "INVALID_PAYLOAD", "message": "JSON object가 필요합니다."}
+        if payload.get("type") != "configure_wifi":
+            return {
+                "ok": False,
+                "error_code": "INVALID_MESSAGE_TYPE",
+                "message": "type은 configure_wifi여야 합니다.",
+            }
+        validation = self.wifi_manager.validate_wifi_payload(
+            {"ssid": payload.get("ssid"), "password": payload.get("password")}
+        )
+        if not validation.get("ok"):
+            return {
+                "ok": False,
+                "error_code": "INVALID_WIFI_PAYLOAD",
+                "message": validation.get("message", "WiFi 설정값이 올바르지 않습니다."),
+            }
+        return {"ok": True, "message": "ok"}
+
+    def handle_gatt_configure(self, payload):
+        """Process a real GATT write through the same WiFiManager as HTTP."""
+        validation = self.validate_configure_payload(payload)
+        if not validation["ok"]:
+            return self._error_response(
+                validation["error_code"], validation["message"], payload.get("type") if isinstance(payload, dict) else None
+            )
+        return self.handle_provisioning_message(payload)
 
     def get_status(self):
         wifi_status = self._wifi_status()

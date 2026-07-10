@@ -154,22 +154,23 @@ curl -X POST http://localhost:8000/network/wifi/configure \
 
 Important current-state note:
 
-- `network/ble_provisioning_manager.py` is an HTTP mock provisioning state manager, not a real BLE implementation.
-- `/provisioning/ble/*` endpoints are not real BLE. They are mock/debug HTTP APIs for testing the app/server flow before GATT exists.
-- Real BLE implementation must make the Raspberry Pi advertise as `VisionPoseCoach-Pi`.
+- `/provisioning/ble/*` endpoints are not real BLE. They remain mock/debug HTTP APIs.
+- `network/ble_gatt_server.py` contains the real BlueZ D-Bus GATT application and advertisement implementation.
+- Run the actual peripheral separately with `tools/run_ble_gatt_server.py`; Raspberry Pi hardware verification is still required.
 - The Flutter app must find `VisionPoseCoach-Pi` through BLE scan and send SSID/password through a GATT characteristic write.
 - BLE payloads must ultimately route to `WiFiManager.configure_wifi(ssid, password)`.
-- The next GATT contract is documented in `BLE_GATT_SPEC.md`.
+- The GATT contract is documented in `BLE_GATT_SPEC.md`.
+- FastAPI and the GATT runner are separate processes. `/provisioning/ble/status` does not mirror the live GATT process state.
 
 Current behavior:
 
-- No `bluetoothctl`, `hciconfig`, `rfkill`, `dbus-send`, `systemctl`, or other Bluetooth system command is executed.
-- Real BLE advertising, pairing, and characteristic writes are not performed yet.
-- `/provisioning/ble/message` is an HTTP mock for the payloads that will later arrive through BLE.
-- BLE status includes `implementation=http_mock`, `real_ble=false`, and `gatt_available=false` until the real GATT server is implemented.
+- The code does not force Bluetooth or network system settings; operational commands are manual diagnostics only.
+- `/provisioning/ble/message` remains an HTTP mock of the configure payload.
+- FastAPI BLE status intentionally reports `implementation=http_mock`, `real_ble=false`, and `gatt_available=false`.
+- The standalone GATT server registers the service and advertisement through BlueZ system D-Bus.
 - The BLE manager receives `configure_wifi` messages and calls `WiFiManager.configure_wifi(ssid, password)`.
 - WiFi passwords are not stored in BLE manager state and are not returned by responses or `/health` debug output.
-- Future real BLE support can be implemented with a Raspberry Pi compatible BLE stack such as BlueZ/DBus, `bleak`, or `bless`.
+- `dbus-next` is loaded only when the standalone server starts, so development imports work without BlueZ.
 
 Provisioning state model:
 
@@ -182,6 +183,28 @@ Provisioning state model:
 - `ERROR`: provisioning failed
 
 In dry-run mode, `COMPLETED` means the WiFi configuration request was processed by the server. It does not prove that Raspberry Pi joined the WiFi network.
+
+### Raspberry Pi BLE verification checklist
+
+Run mock WiFi mode first so BLE can be verified without changing the active network:
+
+```bash
+sudo systemctl status bluetooth
+bluetoothctl show
+rfkill list
+nmcli device status
+python -c "import dbus_next; print('dbus-next ok')"
+VPC_WIFI_MODE=mock python tools/run_ble_gatt_server.py --debug
+```
+
+After scan, read, write, and notify work from a phone, test real WiFi deliberately:
+
+```bash
+nmcli device wifi list
+VPC_WIFI_MODE=real python tools/run_ble_gatt_server.py --debug
+```
+
+`VPC_WIFI_MODE=real` changes the Raspberry Pi WiFi connection and may disconnect the current SSH session. If `VisionPoseCoach-Pi` is not visible, check `bluetooth.service`, `rfkill`, and `Powered: yes` in `bluetoothctl show`. If GATT registration fails, check the BlueZ version, adapter GATT/advertising support, system D-Bus policy, and `journalctl -u bluetooth`. If WiFi configuration fails, confirm the SSID with `nmcli device wifi list` and inspect NetworkManager status. Do not place a password in diagnostic commands, logs, screenshots, or issue reports.
 
 Mock provisioning message example:
 

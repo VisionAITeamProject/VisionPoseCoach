@@ -213,6 +213,38 @@ VisionPoseCoach는 사용자의 앉은 자세를 실시간으로 분석하고, �
 - 하루 단위 리포트를 통해 장기적인 자세 개선 방향 제공
 - 비전 AI, 웹, 하드웨어를 결합한 통합형 자세 코칭 시스템 구현
 
+## Raspberry Pi BLE Wi-Fi Provisioning
+
+BLE는 최초 Wi-Fi 설정에만 사용합니다. 실제 측정 데이터는 Wi-Fi 연결 후 HTTP/WebSocket/MJPG로 전송합니다. `/provisioning/ble/*`는 개발 PC와 Flutter 사전 연동을 위한 HTTP mock이며 실제 Bluetooth가 아닙니다. 실제 peripheral은 BlueZ system D-Bus 기반 `WorkSpace/network/ble_gatt_server.py`입니다. `dbus-next`는 BlueZ API를 Python에서 비동기로 등록하기 위한 얇은 D-Bus 클라이언트로 선택했습니다.
+
+Raspberry Pi OS에서 다음 구성요소가 필요합니다.
+
+```bash
+sudo apt update
+sudo apt install -y bluez network-manager python3-venv
+cd WorkSpace
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-server.txt
+sudo systemctl enable --now bluetooth
+sudo systemctl status bluetooth
+bluetoothctl show
+nmcli device status
+VPC_WIFI_MODE=real python tools/run_ble_gatt_server.py
+```
+
+옵션은 `--device-name VisionPoseCoach-Pi`, `--wifi-mode mock`, `--debug`입니다. 일반 사용자 D-Bus 정책에서 GATT 등록이 거부되면 전용 systemd 서비스/BlueZ policy 구성을 권장하며, 진단 목적으로만 `sudo -E` 실행 여부를 확인할 수 있습니다. 광고가 보이지 않으면 아래를 점검합니다. 코드는 시스템 설정을 자동 변경하지 않습니다.
+
+```bash
+sudo rfkill unblock bluetooth
+sudo systemctl restart bluetooth
+rfkill list bluetooth
+bluetoothctl show
+journalctl -u bluetooth -n 100 --no-pager
+```
+
+어댑터가 `Powered: yes`인지, BlueZ가 GATT/LE Advertising manager를 노출하는지, 동시에 실행 중인 다른 GATT peripheral이 없는지 확인합니다. 실제 UUID와 Flutter 흐름은 `WorkSpace/BLE_GATT_SPEC.md`를 따릅니다.
+
 <br/>
 
 ## 프로젝트 차별점
