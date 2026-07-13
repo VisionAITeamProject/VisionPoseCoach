@@ -194,17 +194,17 @@ bluetoothctl show
 rfkill list
 nmcli device status
 python -c "import dbus_next; print('dbus-next ok')"
-VPC_WIFI_MODE=mock python tools/run_ble_gatt_server.py --debug
+VPC_WIFI_MODE=mock python tools/run_ble_gatt_server.py --debug --device-name VisionPoseCoach-Pi --advertise-name VPC-Pi
 ```
 
 After scan, read, write, and notify work from a phone, test real WiFi deliberately:
 
 ```bash
 nmcli device wifi list
-VPC_WIFI_MODE=real python tools/run_ble_gatt_server.py --debug
+VPC_WIFI_MODE=real python tools/run_ble_gatt_server.py --debug --device-name VisionPoseCoach-Pi --advertise-name VPC-Pi
 ```
 
-`VPC_WIFI_MODE=real` changes the Raspberry Pi WiFi connection and may disconnect the current SSH session. If `VisionPoseCoach-Pi` is not visible, check `bluetooth.service`, `rfkill`, and `Powered: yes` in `bluetoothctl show`. If GATT registration fails, check the BlueZ version, adapter GATT/advertising support, system D-Bus policy, and `journalctl -u bluetooth`. If WiFi configuration fails, confirm the SSID with `nmcli device wifi list` and inspect NetworkManager status. Do not place a password in diagnostic commands, logs, screenshots, or issue reports.
+`VPC_WIFI_MODE=real` changes the Raspberry Pi WiFi connection and may disconnect the current SSH session. Scan by the Service UUID; the optional local name is `VPC-Pi` and may be absent when the server falls back to a Service UUID-only advertisement. Confirm the full `VisionPoseCoach-Pi` name by reading Hello / Device Info after connecting. If no matching service is visible, check `bluetooth.service`, `rfkill`, and `Powered: yes` in `bluetoothctl show`. If GATT registration fails, check the BlueZ version, adapter GATT/advertising support, system D-Bus policy, and `journalctl -u bluetooth`. A passing pytest run does not verify actual BlueZ advertisement registration, so always perform the scan/connect/read check on Raspberry Pi hardware. If WiFi configuration fails, confirm the SSID with `nmcli device wifi list` and inspect NetworkManager status. Do not place a password in diagnostic commands, logs, screenshots, or issue reports.
 
 Mock provisioning message example:
 

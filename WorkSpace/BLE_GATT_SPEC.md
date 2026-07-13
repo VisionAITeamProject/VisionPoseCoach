@@ -9,14 +9,15 @@ The `/provisioning/ble/*` FastAPI endpoints remain HTTP mock/debug APIs only. Re
 - `network/ble_gatt_server.py` registers a real BlueZ GATT application and LE advertisement through the system D-Bus.
 - `/provisioning/ble/*` is not real BLE.
 - The HTTP mock exists so the Flutter app and FastAPI server can test the provisioning flow without BLE hardware.
-- The real BlueZ implementation exists in code, but still requires Raspberry Pi hardware verification.
-- The Flutter app must scan for `VisionPoseCoach-Pi` and write WiFi credentials through a GATT characteristic.
+- The real BlueZ implementation exists in code, but advertisement registration still requires Raspberry Pi hardware verification even when pytest passes.
+- The Flutter app must scan by the Provisioning Service UUID and write WiFi credentials through a GATT characteristic.
 - The payload received over BLE must ultimately call `WiFiManager.configure_wifi(ssid, password)`.
 - Passwords must never be included in responses, logs, status payloads, or debug output.
 
 ## Device
 
-- Device Name: `VisionPoseCoach-Pi`
+- Device Name (Hello / Device Info): `VisionPoseCoach-Pi`
+- Advertisement Local Name: `VPC-Pi` by default; it may be absent when BlueZ requires the Service UUID-only fallback.
 - Role: Raspberry Pi BLE peripheral / GATT server
 - Client: Flutter mobile app BLE central
 
@@ -93,7 +94,7 @@ Real GATT state values are `IDLE`, `ADVERTISING`, `CONNECTED`, `WIFI_CONFIGURING
 
 ## Flutter Flow
 
-1. Scan for the local name `VisionPoseCoach-Pi` (also match the service UUID).
+1. Scan for the Provisioning Service UUID. Treat the optional local name `VPC-Pi` only as a hint.
 2. Connect and discover the provisioning service.
 3. Read Hello / Device Info and verify the device name.
 4. Subscribe to Status notifications, then read Status once.
@@ -108,10 +109,18 @@ The server accepts one complete UTF-8 JSON write of at most 512 bytes. Applicati
 
 ## Implementation Notes
 
-1. Start a BLE peripheral named `VisionPoseCoach-Pi`.
-2. Advertise the Provisioning Service UUID.
+1. Keep the full device name `VisionPoseCoach-Pi` in Hello / Device Info and use the shorter advertisement name `VPC-Pi`.
+2. Advertise the Provisioning Service UUID with LocalName first; if BlueZ rejects those parameters, retry with the Service UUID only.
 3. Expose Hello / Device Info as read-only and accept only `configure_wifi` JSON on the configure characteristic.
 4. Reuse `BLEProvisioningManager.handle_gatt_configure(payload)` for validation and state handling.
 5. Route WiFi credentials to `WiFiManager.configure_wifi(ssid, password)`.
 6. Notify the Status Characteristic when provisioning state changes.
 7. After WiFi configuration, the app should check `/network/status` or `/health` over WiFi.
+
+Run the peripheral with explicit names when needed:
+
+```bash
+VPC_WIFI_MODE=mock python tools/run_ble_gatt_server.py --debug --device-name VisionPoseCoach-Pi --advertise-name VPC-Pi
+```
+
+Unit tests verify the advertisement property contract, but BlueZ registration behavior depends on the Raspberry Pi adapter, firmware, and BlueZ version. A successful `pytest` run does not replace an on-device scan/connect/read test.

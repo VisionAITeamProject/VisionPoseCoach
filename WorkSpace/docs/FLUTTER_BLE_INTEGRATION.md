@@ -7,6 +7,7 @@ This repository currently has no Flutter project. This guide defines the client 
 | Item | Value / properties |
 | --- | --- |
 | Device name | `VisionPoseCoach-Pi` |
+| Advertisement local name | `VPC-Pi` when included; it may be absent after BlueZ fallback |
 | Service | `9f4c0001-7d9a-4b57-9d9f-000000000001` |
 | WiFi Configure | `9f4c0002-7d9a-4b57-9d9f-000000000002` / Write |
 | Status | `9f4c0003-7d9a-4b57-9d9f-000000000003` / Read, Notify |
@@ -42,9 +43,9 @@ On iOS add `NSBluetoothAlwaysUsageDescription` to `Info.plist` (and the older pe
 ## Client flow
 
 1. Confirm Bluetooth permission and adapter state.
-2. Scan by service UUID; use the local name as an additional identity check.
+2. Scan by service UUID. Use `VPC-Pi`, when visible, only as an additional hint rather than the primary filter.
 3. Connect with a timeout and discover services.
-4. Read Hello / Device Info and verify `device_name` and `service_uuid`.
+4. Read Hello / Device Info and use its full `device_name` and `service_uuid` for final verification.
 5. Subscribe to Status notifications, then perform one Status read.
 6. Encode and write the configure JSON with response.
 7. Decode status notifications until `WIFI_CONNECTED` or `FAILED`.

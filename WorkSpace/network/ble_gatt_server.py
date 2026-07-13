@@ -11,6 +11,7 @@ from typing import Any
 
 
 DEVICE_NAME = "VisionPoseCoach-Pi"
+ADVERTISE_NAME = "VPC-Pi"
 SERVICE_UUID = "9f4c0001-7d9a-4b57-9d9f-000000000001"
 WIFI_CONFIG_UUID = "9f4c0002-7d9a-4b57-9d9f-000000000002"
 STATUS_UUID = "9f4c0003-7d9a-4b57-9d9f-000000000003"
@@ -50,6 +51,18 @@ def encode_json(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def advertisement_properties(advertise_name: str | None = ADVERTISE_NAME) -> dict[str, Any]:
+    """Return the BlueZ advertisement fields used by each registration attempt."""
+    properties = {"Type": "peripheral", "ServiceUUIDs": [SERVICE_UUID]}
+    if advertise_name is not None:
+        properties["LocalName"] = advertise_name
+    return properties
+
+
+def hello_payload(device_name: str = DEVICE_NAME) -> dict[str, str]:
+    return {"type": "device_info", "device_name": device_name, "service_uuid": SERVICE_UUID}
+
+
 def decode_configure_write(value: bytes | bytearray | list[int]) -> dict[str, Any]:
     raw = bytes(value)
     if not raw or len(raw) > MAX_WRITE_BYTES:
@@ -66,9 +79,17 @@ def decode_configure_write(value: bytes | bytearray | list[int]) -> dict[str, An
 class BlueZGattServer:
     """Registers one provisioning service and advertisement with BlueZ."""
 
-    def __init__(self, provisioning_manager, device_name: str = DEVICE_NAME, logger=None):
+    def __init__(
+        self,
+        provisioning_manager,
+        device_name: str = DEVICE_NAME,
+        advertise_name: str = ADVERTISE_NAME,
+        logger=None,
+    ):
         self.manager = provisioning_manager
         self.device_name = device_name
+        self.advertise_name = advertise_name
+        self.local_name_included = True
         self.log = logger or logging.getLogger(__name__)
         self._bus = None
         self._adapter_path = None
@@ -108,9 +129,13 @@ class BlueZGattServer:
         self._adapter_path = await self._find_adapter()
         await self._build_and_export_objects()
         await self._gatt_manager.call_register_application(APP_PATH, {})
-        await self._adv_manager.call_register_advertisement(ADVERTISEMENT_PATH, {})
+        await self._register_advertisement_with_fallback()
         self.manager.start_advertising()
-        self.log.info("BLE GATT provisioning started: device=%s", self.device_name)
+        self.log.info(
+            "BLE GATT provisioning started: device_name=%s advertise_name=%s",
+            self.device_name,
+            self.advertise_name,
+        )
 
     async def stop(self):
         if self._bus is None:
@@ -155,6 +180,7 @@ class BlueZGattServer:
         self._adv_manager = adapter.get_interface(ADV_MANAGER_IFACE)
 
         classes = _build_dbus_classes(api)
+        self._classes = classes
         status_reader = lambda: encode_json(self.status_payload())
         self._status_characteristic = classes["Characteristic"](
             STATUS_PATH, STATUS_UUID, SERVICE_PATH, list(STATUS_FLAGS), read=status_reader
@@ -167,7 +193,7 @@ class BlueZGattServer:
             HELLO_UUID,
             SERVICE_PATH,
             list(HELLO_FLAGS),
-            read=lambda: encode_json({"type": "device_info", "device_name": self.device_name, "service_uuid": SERVICE_UUID}),
+            read=lambda: encode_json(hello_payload(self.device_name)),
         )
         service = classes["Service"](SERVICE_PATH, SERVICE_UUID, [CONFIG_PATH, STATUS_PATH, HELLO_PATH])
         app = classes["Application"]({
@@ -176,7 +202,7 @@ class BlueZGattServer:
             STATUS_PATH: self._status_characteristic,
             HELLO_PATH: hello,
         })
-        self._advertisement = classes["Advertisement"](ADVERTISEMENT_PATH, self.device_name)
+        self._advertisement = classes["Advertisement"](ADVERTISEMENT_PATH, self.advertise_name)
         for path, interface in [
             (APP_PATH, app), (SERVICE_PATH, service), (CONFIG_PATH, config),
             (STATUS_PATH, self._status_characteristic), (HELLO_PATH, hello),
@@ -184,6 +210,55 @@ class BlueZGattServer:
         ]:
             self._bus.export(path, interface)
             self._exports.append((path, interface))
+
+    async def _register_advertisement_with_fallback(self):
+        try:
+            await self._adv_manager.call_register_advertisement(ADVERTISEMENT_PATH, {})
+            return
+        except Exception as exc:
+            self._log_advertisement_error(exc, local_name_included=True)
+            if not _is_advertisement_parameter_error(exc):
+                raise
+
+        self.log.warning(
+            "Retrying BLE advertisement registration without LocalName: service_uuid=%s",
+            SERVICE_UUID,
+        )
+        self._replace_advertisement_with_service_uuid_only()
+        try:
+            await self._adv_manager.call_register_advertisement(ADVERTISEMENT_PATH, {})
+        except Exception as exc:
+            self._log_advertisement_error(exc, local_name_included=False)
+            raise
+        self.log.info("BLE advertisement registered with ServiceUUIDs only (LocalName omitted)")
+
+    def _replace_advertisement_with_service_uuid_only(self):
+        previous = self._advertisement
+        self._bus.unexport(ADVERTISEMENT_PATH, previous)
+        self._exports = [
+            (path, interface)
+            for path, interface in self._exports
+            if not (path == ADVERTISEMENT_PATH and interface is previous)
+        ]
+        self._advertisement = self._classes["ServiceOnlyAdvertisement"](ADVERTISEMENT_PATH)
+        self.local_name_included = False
+        self._bus.export(ADVERTISEMENT_PATH, self._advertisement)
+        self._exports.append((ADVERTISEMENT_PATH, self._advertisement))
+
+    def _log_advertisement_error(self, exc: Exception, *, local_name_included: bool):
+        error_name, error_message = _dbus_error_details(exc)
+        self.log.error(
+            "BLE advertisement registration failed: adapter path=%s; device_name=%s; "
+            "advertise_name=%s; service_uuid=%s; local_name included=%s; "
+            "service_uuid included=yes; dbus error type/name=%s; dbus error message=%s",
+            self._adapter_path,
+            self.device_name,
+            self.advertise_name,
+            SERVICE_UUID,
+            "yes" if local_name_included else "no",
+            error_name,
+            error_message,
+        )
 
     def _on_config_write(self, value):
         try:
@@ -215,6 +290,22 @@ def _load_dbus_api():
             "실제 BLE 서버에는 dbus-next가 필요합니다. requirements-server.txt를 설치하세요."
         ) from exc
     return locals()
+
+
+def _dbus_error_details(exc: Exception) -> tuple[str, str]:
+    error_name = getattr(exc, "type", None) or getattr(exc, "name", None) or type(exc).__name__
+    error_message = getattr(exc, "text", None) or getattr(exc, "message", None) or str(exc)
+    return str(error_name), str(error_message)
+
+
+def _is_advertisement_parameter_error(exc: Exception) -> bool:
+    error_name, error_message = _dbus_error_details(exc)
+    combined = f"{error_name} {error_message}".lower()
+    return (
+        "invalidparameters" in combined
+        or "invalid parameters" in combined
+        or "failed to register advertisement" in combined
+    )
 
 
 def _build_dbus_classes(api):
@@ -280,16 +371,35 @@ def _build_dbus_classes(api):
     class Advertisement(ServiceInterface):
         def __init__(self, path, local_name):
             super().__init__("org.bluez.LEAdvertisement1")
-            self.path, self.local_name = path, local_name
+            self.path = path
+            self.properties = advertisement_properties(local_name)
         @dbus_property(access=PropertyAccess.READ)
-        def Type(self) -> "s": return "peripheral"
+        def Type(self) -> "s": return self.properties["Type"]
         @dbus_property(access=PropertyAccess.READ)
-        def ServiceUUIDs(self) -> "as": return [SERVICE_UUID]
+        def ServiceUUIDs(self) -> "as": return self.properties["ServiceUUIDs"]
         @dbus_property(access=PropertyAccess.READ)
-        def LocalName(self) -> "s": return self.local_name
-        @dbus_property(access=PropertyAccess.READ)
-        def Includes(self) -> "as": return ["tx-power"]
+        def LocalName(self) -> "s": return self.properties["LocalName"]
         @method()
         def Release(self): pass
 
-    return {"Application": Application, "Service": Service, "Characteristic": Characteristic, "Advertisement": Advertisement}
+    class ServiceOnlyAdvertisement(ServiceInterface):
+        """Fallback advertisement whose D-Bus interface omits LocalName entirely."""
+
+        def __init__(self, path):
+            super().__init__("org.bluez.LEAdvertisement1")
+            self.path = path
+            self.properties = advertisement_properties(None)
+        @dbus_property(access=PropertyAccess.READ)
+        def Type(self) -> "s": return self.properties["Type"]
+        @dbus_property(access=PropertyAccess.READ)
+        def ServiceUUIDs(self) -> "as": return self.properties["ServiceUUIDs"]
+        @method()
+        def Release(self): pass
+
+    return {
+        "Application": Application,
+        "Service": Service,
+        "Characteristic": Characteristic,
+        "Advertisement": Advertisement,
+        "ServiceOnlyAdvertisement": ServiceOnlyAdvertisement,
+    }
