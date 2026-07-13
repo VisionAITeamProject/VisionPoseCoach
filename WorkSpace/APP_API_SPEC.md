@@ -430,7 +430,7 @@ WebSocket 연결 직후 1회 전송됩니다. 앱 재접속 시 현재 상태를
 
 BLE Provisioning은 초기 설정에서 앱이 라즈베리파이를 발견하고 WiFi 정보를 전달하기 위한 통로입니다. 측정 화면에서는 BLE를 사용하지 않고 `/session/status`, `/mjpg`, `/ws`를 사용합니다.
 
-`/provisioning/ble/*` API는 계속 HTTP mock provisioning이며 실제 Bluetooth 통신이 아닙니다. 실제 Raspberry Pi peripheral/GATT 구현은 `network/ble_gatt_server.py`에 있고 `tools/run_ble_gatt_server.py`로 별도 실행합니다. Flutter 앱은 BLE scan으로 `VisionPoseCoach-Pi`를 찾고 GATT characteristic write로 SSID/password를 보냅니다. Raspberry Pi BLE 서버는 payload를 검증한 뒤 기존 `WiFiManager.configure_wifi(ssid, password)`를 호출합니다. Wi-Fi 연결 이후 측정 통신은 BLE가 아닌 HTTP/WebSocket/MJPG를 사용합니다.
+`/provisioning/ble/*` API는 계속 HTTP mock provisioning이며 실제 Bluetooth 통신이 아닙니다. 실제 Raspberry Pi peripheral/GATT 구현은 `network/ble_gatt_server.py`에 있고 `tools/run_ble_gatt_server.py`로 별도 실행합니다. GATT Application은 D-Bus로 등록하며 광고는 `auto`, `dbus`, `btmgmt` backend 중 하나를 사용합니다. Flutter 앱은 Service UUID를 우선하여 scan하고, 연결 후 Hello / Device Info의 `device_name`으로 최종 확인한 다음 GATT characteristic write로 SSID/password를 보냅니다. Raspberry Pi BLE 서버는 payload를 검증한 뒤 기존 `WiFiManager.configure_wifi(ssid, password)`를 호출합니다. Wi-Fi 연결 이후 측정 통신은 BLE가 아닌 HTTP/WebSocket/MJPG를 사용합니다.
 
 현재 GATT 스펙은 `BLE_GATT_SPEC.md`에 정리되어 있습니다. FastAPI와 실제 GATT 서버는 별도 프로세스이므로 `/provisioning/ble/status`는 실행 중인 GATT 서버 상태를 직접 반영하지 않습니다.
 

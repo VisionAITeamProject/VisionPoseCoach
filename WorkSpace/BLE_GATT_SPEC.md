@@ -6,7 +6,7 @@ The `/provisioning/ble/*` FastAPI endpoints remain HTTP mock/debug APIs only. Re
 ## Current State
 
 - `network/ble_provisioning_manager.py` validates payloads, owns provisioning state, and calls the shared `WiFiManager`; FastAPI also uses it for its HTTP mock.
-- `network/ble_gatt_server.py` registers a real BlueZ GATT application and LE advertisement through the system D-Bus.
+- `network/ble_gatt_server.py` always registers the real BlueZ GATT application through the system D-Bus. Advertising can use BlueZ D-Bus or `btmgmt`.
 - `/provisioning/ble/*` is not real BLE.
 - The HTTP mock exists so the Flutter app and FastAPI server can test the provisioning flow without BLE hardware.
 - The real BlueZ implementation exists in code, but advertisement registration still requires Raspberry Pi hardware verification even when pytest passes.
@@ -110,7 +110,7 @@ The server accepts one complete UTF-8 JSON write of at most 512 bytes. Applicati
 ## Implementation Notes
 
 1. Keep the full device name `VisionPoseCoach-Pi` in Hello / Device Info and use the shorter advertisement name `VPC-Pi`.
-2. Advertise the Provisioning Service UUID with LocalName first; if BlueZ rejects those parameters, retry with the Service UUID only.
+2. Advertise the unchanged Provisioning Service UUID through the selected `auto`, `dbus`, or `btmgmt` backend.
 3. Expose Hello / Device Info as read-only and accept only `configure_wifi` JSON on the configure characteristic.
 4. Reuse `BLEProvisioningManager.handle_gatt_configure(payload)` for validation and state handling.
 5. Route WiFi credentials to `WiFiManager.configure_wifi(ssid, password)`.
@@ -120,7 +120,26 @@ The server accepts one complete UTF-8 JSON write of at most 512 bytes. Applicati
 Run the peripheral with explicit names when needed:
 
 ```bash
-VPC_WIFI_MODE=mock python tools/run_ble_gatt_server.py --debug --device-name VisionPoseCoach-Pi --advertise-name VPC-Pi
+VPC_WIFI_MODE=mock python tools/run_ble_gatt_server.py --debug --device-name VisionPoseCoach-Pi --advertise-name VPC-Pi --advertising-backend auto --advertising-instance 1
+```
+
+Advertising backend behavior:
+
+- `auto` (default): try D-Bus advertising first. If BlueZ returns `org.bluez.Error.Failed`, start `btmgmt` advertising on the same `hciN` adapter.
+- `dbus`: use only `org.bluez.LEAdvertisingManager1`; no `btmgmt` fallback.
+- `btmgmt`: keep GATT Application registration on D-Bus, but run `btmgmt add-adv` for a connectable/general-discoverable advertisement containing the 128-bit Service UUID. Local name is omitted to avoid exceeding the legacy advertisement size limit.
+- A successful `btmgmt` instance number is retained and removed with `btmgmt rm-adv` during Ctrl+C, SIGTERM, startup failure cleanup, or normal shutdown.
+- `btmgmt` requires sufficient Bluetooth management privileges, so the Raspberry Pi command normally runs under `sudo`.
+
+Direct Raspberry Pi fallback example:
+
+```bash
+sudo -E env VPC_WIFI_MODE=mock \
+  /home/willtek/VisionPoseCoach/.venv/bin/python \
+  tools/run_ble_gatt_server.py \
+  --debug \
+  --advertising-backend btmgmt \
+  --advertising-instance 1
 ```
 
 Unit tests verify the advertisement property contract, but BlueZ registration behavior depends on the Raspberry Pi adapter, firmware, and BlueZ version. A successful `pytest` run does not replace an on-device scan/connect/read test.

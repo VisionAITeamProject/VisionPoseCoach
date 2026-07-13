@@ -167,7 +167,7 @@ Current behavior:
 - The code does not force Bluetooth or network system settings; operational commands are manual diagnostics only.
 - `/provisioning/ble/message` remains an HTTP mock of the configure payload.
 - FastAPI BLE status intentionally reports `implementation=http_mock`, `real_ble=false`, and `gatt_available=false`.
-- The standalone GATT server registers the service and advertisement through BlueZ system D-Bus.
+- The standalone server always registers GATT through BlueZ system D-Bus. Advertising uses the selected `auto`, `dbus`, or `btmgmt` backend.
 - The BLE manager receives `configure_wifi` messages and calls `WiFiManager.configure_wifi(ssid, password)`.
 - WiFi passwords are not stored in BLE manager state and are not returned by responses or `/health` debug output.
 - `dbus-next` is loaded only when the standalone server starts, so development imports work without BlueZ.
@@ -194,17 +194,31 @@ bluetoothctl show
 rfkill list
 nmcli device status
 python -c "import dbus_next; print('dbus-next ok')"
-VPC_WIFI_MODE=mock python tools/run_ble_gatt_server.py --debug --device-name VisionPoseCoach-Pi --advertise-name VPC-Pi
+sudo -E env VPC_WIFI_MODE=mock \
+  .venv/bin/python tools/run_ble_gatt_server.py \
+  --debug \
+  --device-name VisionPoseCoach-Pi \
+  --advertise-name VPC-Pi \
+  --advertising-backend auto \
+  --advertising-instance 1
 ```
 
 After scan, read, write, and notify work from a phone, test real WiFi deliberately:
 
 ```bash
 nmcli device wifi list
-VPC_WIFI_MODE=real python tools/run_ble_gatt_server.py --debug --device-name VisionPoseCoach-Pi --advertise-name VPC-Pi
+sudo -E env VPC_WIFI_MODE=real \
+  .venv/bin/python tools/run_ble_gatt_server.py \
+  --debug \
+  --device-name VisionPoseCoach-Pi \
+  --advertise-name VPC-Pi \
+  --advertising-backend auto \
+  --advertising-instance 1
 ```
 
-`VPC_WIFI_MODE=real` changes the Raspberry Pi WiFi connection and may disconnect the current SSH session. Scan by the Service UUID; the optional local name is `VPC-Pi` and may be absent when the server falls back to a Service UUID-only advertisement. Confirm the full `VisionPoseCoach-Pi` name by reading Hello / Device Info after connecting. If no matching service is visible, check `bluetooth.service`, `rfkill`, and `Powered: yes` in `bluetoothctl show`. If GATT registration fails, check the BlueZ version, adapter GATT/advertising support, system D-Bus policy, and `journalctl -u bluetooth`. A passing pytest run does not verify actual BlueZ advertisement registration, so always perform the scan/connect/read check on Raspberry Pi hardware. If WiFi configuration fails, confirm the SSID with `nmcli device wifi list` and inspect NetworkManager status. Do not place a password in diagnostic commands, logs, screenshots, or issue reports.
+In `auto`, the server first tries D-Bus advertising and falls back to `btmgmt add-adv` when BlueZ returns `org.bluez.Error.Failed`. `--advertising-backend dbus` disables that fallback; `--advertising-backend btmgmt` selects it immediately. GATT remains registered through D-Bus in every mode. The `btmgmt` advertisement contains the 128-bit Service UUID but omits local name to stay within the legacy advertisement size limit. The successful advertising instance is removed with `btmgmt rm-adv` on shutdown; do not reuse the same instance from another process while the server is running.
+
+`VPC_WIFI_MODE=real` changes the Raspberry Pi WiFi connection and may disconnect the current SSH session. Scan by the Service UUID; the optional local name is `VPC-Pi` and may be absent or adapter-managed under `btmgmt`. Confirm the full `VisionPoseCoach-Pi` name by reading Hello / Device Info after connecting. If no matching service is visible, check `bluetooth.service`, `rfkill`, `Powered: yes`, `btmgmt info`, and whether the selected advertising instance is already occupied. If GATT registration fails, check the BlueZ version, adapter support, system D-Bus policy, and `journalctl -u bluetooth`. A passing pytest run does not verify actual advertising registration, so always perform the scan/connect/read check on Raspberry Pi hardware. If WiFi configuration fails, confirm the SSID with `nmcli device wifi list` and inspect NetworkManager status. Do not place a password in diagnostic commands, logs, screenshots, or issue reports.
 
 Mock provisioning message example:
 

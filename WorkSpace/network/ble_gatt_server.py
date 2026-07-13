@@ -7,11 +7,15 @@ FastAPI and unit tests remain usable on machines without BlueZ or D-Bus.
 import asyncio
 import json
 import logging
+import re
+import subprocess
 from typing import Any
 
 
 DEVICE_NAME = "VisionPoseCoach-Pi"
 ADVERTISE_NAME = "VPC-Pi"
+ADVERTISING_BACKENDS = ("auto", "dbus", "btmgmt")
+DEFAULT_ADVERTISING_INSTANCE = 1
 SERVICE_UUID = "9f4c0001-7d9a-4b57-9d9f-000000000001"
 WIFI_CONFIG_UUID = "9f4c0002-7d9a-4b57-9d9f-000000000002"
 STATUS_UUID = "9f4c0003-7d9a-4b57-9d9f-000000000003"
@@ -63,6 +67,24 @@ def hello_payload(device_name: str = DEVICE_NAME) -> dict[str, str]:
     return {"type": "device_info", "device_name": device_name, "service_uuid": SERVICE_UUID}
 
 
+def adapter_name_from_path(adapter_path: str) -> str:
+    adapter_name = adapter_path.rstrip("/").rsplit("/", 1)[-1]
+    if not re.fullmatch(r"hci\d+", adapter_name):
+        raise BLEBackendUnavailable(f"btmgmt에 사용할 수 없는 BlueZ adapter path입니다: {adapter_path}")
+    return adapter_name
+
+
+def btmgmt_add_command(adapter_name: str, instance: int) -> list[str]:
+    return [
+        "btmgmt", "-i", adapter_name, "add-adv", "-c", "-g",
+        "-u", SERVICE_UUID, str(instance),
+    ]
+
+
+def btmgmt_remove_command(adapter_name: str, instance: int) -> list[str]:
+    return ["btmgmt", "-i", adapter_name, "rm-adv", str(instance)]
+
+
 def decode_configure_write(value: bytes | bytearray | list[int]) -> dict[str, Any]:
     raw = bytes(value)
     if not raw or len(raw) > MAX_WRITE_BYTES:
@@ -84,19 +106,33 @@ class BlueZGattServer:
         provisioning_manager,
         device_name: str = DEVICE_NAME,
         advertise_name: str = ADVERTISE_NAME,
+        advertising_backend: str = "auto",
+        advertising_instance: int = DEFAULT_ADVERTISING_INSTANCE,
+        command_runner=None,
         logger=None,
     ):
+        if advertising_backend not in ADVERTISING_BACKENDS:
+            raise ValueError(f"지원하지 않는 advertising backend입니다: {advertising_backend}")
+        if not 1 <= advertising_instance <= 255:
+            raise ValueError("advertising instance는 1~255 범위여야 합니다.")
         self.manager = provisioning_manager
         self.device_name = device_name
         self.advertise_name = advertise_name
+        self.advertising_backend = advertising_backend
+        self.advertising_instance = advertising_instance
+        self.active_advertising_backend = None
         self.local_name_included = True
         self.log = logger or logging.getLogger(__name__)
+        self._command_runner = command_runner or subprocess.run
         self._bus = None
         self._adapter_path = None
         self._gatt_manager = None
         self._adv_manager = None
         self._exports: list[tuple[str, Any]] = []
         self._advertisement = None
+        self._dbus_advertisement_registered = False
+        self._btmgmt_instance = None
+        self._btmgmt_adapter = None
         self._status_characteristic = None
         self._stopped = asyncio.Event()
 
@@ -129,20 +165,24 @@ class BlueZGattServer:
         self._adapter_path = await self._find_adapter()
         await self._build_and_export_objects()
         await self._gatt_manager.call_register_application(APP_PATH, {})
-        await self._register_advertisement_with_fallback()
+        await self._start_advertising_backend()
         self.manager.start_advertising()
         self.log.info(
-            "BLE GATT provisioning started: device_name=%s advertise_name=%s",
+            "BLE GATT provisioning started: device_name=%s advertise_name=%s advertising_backend=%s",
             self.device_name,
             self.advertise_name,
+            self.active_advertising_backend,
         )
 
     async def stop(self):
+        await self._stop_btmgmt_advertising()
         if self._bus is None:
+            self._stopped.set()
             return
         try:
-            if self._adv_manager and self._advertisement:
+            if self._dbus_advertisement_registered and self._adv_manager and self._advertisement:
                 await self._adv_manager.call_unregister_advertisement(ADVERTISEMENT_PATH)
+                self._dbus_advertisement_registered = False
         except Exception as exc:  # BlueZ may already be gone during shutdown.
             self.log.debug("BLE advertisement cleanup skipped: %s", type(exc).__name__)
         try:
@@ -166,7 +206,11 @@ class BlueZGattServer:
         root = self._bus.get_proxy_object(BLUEZ_SERVICE, "/", introspection)
         objects = await root.get_interface(DBUS_OBJECT_MANAGER_IFACE).call_get_managed_objects()
         for path, interfaces in objects.items():
-            if GATT_MANAGER_IFACE in interfaces and ADV_MANAGER_IFACE in interfaces:
+            has_gatt = GATT_MANAGER_IFACE in interfaces
+            has_required_advertising = (
+                self.advertising_backend == "btmgmt" or ADV_MANAGER_IFACE in interfaces
+            )
+            if has_gatt and has_required_advertising:
                 return path
         raise BLEBackendUnavailable(
             "BLE GATT/advertising 지원 BlueZ adapter를 찾지 못했습니다. bluetooth.service, rfkill, adapter 전원을 확인하세요."
@@ -177,7 +221,11 @@ class BlueZGattServer:
         introspection = await self._bus.introspect(BLUEZ_SERVICE, self._adapter_path)
         adapter = self._bus.get_proxy_object(BLUEZ_SERVICE, self._adapter_path, introspection)
         self._gatt_manager = adapter.get_interface(GATT_MANAGER_IFACE)
-        self._adv_manager = adapter.get_interface(ADV_MANAGER_IFACE)
+        self._adv_manager = (
+            None
+            if self.advertising_backend == "btmgmt"
+            else adapter.get_interface(ADV_MANAGER_IFACE)
+        )
 
         classes = _build_dbus_classes(api)
         self._classes = classes
@@ -210,6 +258,112 @@ class BlueZGattServer:
         ]:
             self._bus.export(path, interface)
             self._exports.append((path, interface))
+
+    async def _start_advertising_backend(self):
+        if self.advertising_backend == "btmgmt":
+            await self._start_btmgmt_advertising()
+            return
+
+        try:
+            if self.advertising_backend == "auto":
+                await self._register_dbus_advertisement_once()
+            else:
+                await self._register_advertisement_with_fallback()
+            self._dbus_advertisement_registered = True
+            self.active_advertising_backend = "dbus"
+            return
+        except Exception as exc:
+            if self.advertising_backend != "auto" or not _is_bluez_failed_error(exc):
+                raise
+            error_name, error_message = _dbus_error_details(exc)
+            self.log.warning(
+                "D-Bus advertising failed; falling back to btmgmt: "
+                "dbus error type/name=%s; dbus error message=%s",
+                error_name,
+                error_message,
+            )
+
+        await self._start_btmgmt_advertising()
+
+    async def _register_dbus_advertisement_once(self):
+        try:
+            await self._adv_manager.call_register_advertisement(ADVERTISEMENT_PATH, {})
+        except Exception as exc:
+            self._log_advertisement_error(exc, local_name_included=True)
+            raise
+
+    async def _start_btmgmt_advertising(self):
+        adapter_name = adapter_name_from_path(self._adapter_path)
+        command = btmgmt_add_command(adapter_name, self.advertising_instance)
+        result = await self._run_btmgmt(command)
+        if result.returncode != 0:
+            self._log_btmgmt_failure("add-adv", result)
+            raise BLEBackendUnavailable(
+                f"btmgmt advertisement 등록에 실패했습니다 (return code {result.returncode})."
+            )
+        self._btmgmt_adapter = adapter_name
+        self._btmgmt_instance = self.advertising_instance
+        self.active_advertising_backend = "btmgmt"
+        self.local_name_included = False
+        self.log.info(
+            "btmgmt advertisement registered: adapter=%s instance=%s service_uuid=%s stdout=%r",
+            adapter_name,
+            self._btmgmt_instance,
+            SERVICE_UUID,
+            _safe_process_output(result.stdout),
+        )
+
+    async def _stop_btmgmt_advertising(self):
+        if self._btmgmt_instance is None or self._btmgmt_adapter is None:
+            return
+        adapter_name = self._btmgmt_adapter
+        instance = self._btmgmt_instance
+        try:
+            result = await self._run_btmgmt(btmgmt_remove_command(adapter_name, instance))
+            if result.returncode != 0:
+                self._log_btmgmt_failure("rm-adv", result)
+            else:
+                self.log.info(
+                    "btmgmt advertisement removed: adapter=%s instance=%s",
+                    adapter_name,
+                    instance,
+                )
+        except BLEBackendUnavailable as exc:
+            self.log.error(
+                "btmgmt rm-adv could not run: adapter=%s instance=%s error=%s",
+                adapter_name,
+                instance,
+                exc,
+            )
+        finally:
+            self._btmgmt_instance = None
+            self._btmgmt_adapter = None
+
+    async def _run_btmgmt(self, command: list[str]):
+        try:
+            return await asyncio.to_thread(
+                self._command_runner,
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                shell=False,
+            )
+        except FileNotFoundError as exc:
+            raise BLEBackendUnavailable("btmgmt 명령을 찾지 못했습니다. bluez 패키지를 확인하세요.") from exc
+
+    def _log_btmgmt_failure(self, action: str, result):
+        self.log.error(
+            "btmgmt %s failed: adapter=%s instance=%s service_uuid=%s "
+            "return code=%s stdout=%r stderr=%r",
+            action,
+            self._btmgmt_adapter or adapter_name_from_path(self._adapter_path),
+            self._btmgmt_instance or self.advertising_instance,
+            SERVICE_UUID,
+            result.returncode,
+            _safe_process_output(result.stdout),
+            _safe_process_output(result.stderr),
+        )
 
     async def _register_advertisement_with_fallback(self):
         try:
@@ -306,6 +460,21 @@ def _is_advertisement_parameter_error(exc: Exception) -> bool:
         or "invalid parameters" in combined
         or "failed to register advertisement" in combined
     )
+
+
+def _is_bluez_failed_error(exc: Exception) -> bool:
+    error_name, _ = _dbus_error_details(exc)
+    return error_name == "org.bluez.Error.Failed"
+
+
+def _safe_process_output(value: Any, limit: int = 2000) -> str:
+    text = "" if value is None else str(value).strip()
+    text = re.sub(
+        r"(?i)\b(password|passphrase|psk)\s*([:=])\s*\S+",
+        r"\1\2[REDACTED]",
+        text,
+    )
+    return text if len(text) <= limit else f"{text[:limit]}...<truncated>"
 
 
 def _build_dbus_classes(api):
