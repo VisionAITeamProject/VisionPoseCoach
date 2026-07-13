@@ -16,6 +16,18 @@ DEVICE_NAME = "VisionPoseCoach-Pi"
 ADVERTISE_NAME = "VPC-Pi"
 ADVERTISING_BACKENDS = ("auto", "dbus", "btmgmt")
 DEFAULT_ADVERTISING_INSTANCE = 1
+BTMGMT_PERMISSION_MESSAGE = """btmgmt 광고 등록에는 관리자 권한이 필요합니다.
+
+다음 명령으로 실행하세요:
+
+sudo -E env VPC_WIFI_MODE=mock \\
+  /home/willtek/VisionPoseCoach/.venv/bin/python \\
+  tools/run_ble_gatt_server.py \\
+  --debug \\
+  --advertising-backend btmgmt \\
+  --advertising-instance 1 \\
+  --device-name VisionPoseCoach-Pi \\
+  --advertise-name VPC-Pi"""
 SERVICE_UUID = "9f4c0001-7d9a-4b57-9d9f-000000000001"
 WIFI_CONFIG_UUID = "9f4c0002-7d9a-4b57-9d9f-000000000002"
 STATUS_UUID = "9f4c0003-7d9a-4b57-9d9f-000000000003"
@@ -76,13 +88,40 @@ def adapter_name_from_path(adapter_path: str) -> str:
 
 def btmgmt_add_command(adapter_name: str, instance: int) -> list[str]:
     return [
-        "btmgmt", "-i", adapter_name, "add-adv", "-c", "-g",
+        "btmgmt", "-i", adapter_name, "add-adv", "-c", "-g", "-n",
         "-u", SERVICE_UUID, str(instance),
     ]
 
 
 def btmgmt_remove_command(adapter_name: str, instance: int) -> list[str]:
     return ["btmgmt", "-i", adapter_name, "rm-adv", str(instance)]
+
+
+def btmgmt_info_command(adapter_name: str) -> list[str]:
+    return ["btmgmt", "-i", adapter_name, "info"]
+
+
+def btmgmt_name_command(adapter_name: str, name: str, short_name: str | None = None) -> list[str]:
+    command = ["btmgmt", "-i", adapter_name, "name", name]
+    if short_name:
+        command.append(short_name)
+    return command
+
+
+def parse_btmgmt_names(output: str) -> tuple[str, str]:
+    name = None
+    short_name = ""
+    for line in output.splitlines():
+        short_match = re.match(r"^\s*short\s+name(?:\s+(.*))?$", line, re.IGNORECASE)
+        if short_match:
+            short_name = (short_match.group(1) or "").strip()
+            continue
+        name_match = re.match(r"^\s*name(?:\s+(.*))?$", line, re.IGNORECASE)
+        if name_match:
+            name = (name_match.group(1) or "").strip()
+    if not name:
+        raise ValueError("btmgmt info 출력에서 adapter name을 찾지 못했습니다.")
+    return name, short_name
 
 
 def decode_configure_write(value: bytes | bytearray | list[int]) -> dict[str, Any]:
@@ -133,6 +172,9 @@ class BlueZGattServer:
         self._dbus_advertisement_registered = False
         self._btmgmt_instance = None
         self._btmgmt_adapter = None
+        self._original_adapter_name = None
+        self._original_adapter_short_name = ""
+        self._btmgmt_name_changed = False
         self._status_characteristic = None
         self._stopped = asyncio.Event()
 
@@ -294,40 +336,79 @@ class BlueZGattServer:
 
     async def _start_btmgmt_advertising(self):
         adapter_name = adapter_name_from_path(self._adapter_path)
+        await self._set_btmgmt_adapter_name(adapter_name)
         command = btmgmt_add_command(adapter_name, self.advertising_instance)
         result = await self._run_btmgmt(command)
         if result.returncode != 0:
-            self._log_btmgmt_failure("add-adv", result)
-            raise BLEBackendUnavailable(
-                f"btmgmt advertisement 등록에 실패했습니다 (return code {result.returncode})."
-            )
+            self._raise_btmgmt_failure("add-adv", result)
         self._btmgmt_adapter = adapter_name
         self._btmgmt_instance = self.advertising_instance
         self.active_advertising_backend = "btmgmt"
         self.local_name_included = False
         self.log.info(
-            "btmgmt advertisement registered: adapter=%s instance=%s service_uuid=%s stdout=%r",
+            "btmgmt advertisement registered: adapter=%s instance=%s service_uuid=%s "
+            "advertise_name=%s stdout=%r",
             adapter_name,
             self._btmgmt_instance,
             SERVICE_UUID,
+            self.advertise_name,
             _safe_process_output(result.stdout),
         )
 
+    async def _set_btmgmt_adapter_name(self, adapter_name: str):
+        info_result = await self._run_btmgmt(btmgmt_info_command(adapter_name))
+        if info_result.returncode != 0:
+            self._raise_btmgmt_failure("info", info_result)
+        try:
+            original_name, original_short_name = parse_btmgmt_names(info_result.stdout)
+        except ValueError as exc:
+            self.log.error(
+                "btmgmt info parsing failed: adapter=%s stdout=%r stderr=%r",
+                adapter_name,
+                _safe_process_output(info_result.stdout),
+                _safe_process_output(info_result.stderr),
+            )
+            raise BLEBackendUnavailable(str(exc)) from exc
+
+        self._original_adapter_name = original_name
+        self._original_adapter_short_name = original_short_name
+        self._btmgmt_adapter = adapter_name
+        if original_name == self.advertise_name:
+            return
+
+        name_result = await self._run_btmgmt(btmgmt_name_command(adapter_name, self.advertise_name))
+        if name_result.returncode != 0:
+            self._raise_btmgmt_failure("name", name_result)
+        self._btmgmt_name_changed = True
+        self.log.info(
+            "Bluetooth adapter name set for advertising: adapter=%s advertise_name=%s",
+            adapter_name,
+            self.advertise_name,
+        )
+
     async def _stop_btmgmt_advertising(self):
-        if self._btmgmt_instance is None or self._btmgmt_adapter is None:
+        if self._btmgmt_adapter is None:
             return
         adapter_name = self._btmgmt_adapter
         instance = self._btmgmt_instance
         try:
-            result = await self._run_btmgmt(btmgmt_remove_command(adapter_name, instance))
-            if result.returncode != 0:
-                self._log_btmgmt_failure("rm-adv", result)
-            else:
-                self.log.info(
-                    "btmgmt advertisement removed: adapter=%s instance=%s",
-                    adapter_name,
-                    instance,
-                )
+            if instance is not None:
+                result = await self._run_btmgmt(btmgmt_remove_command(adapter_name, instance))
+                if result.returncode != 0:
+                    if _is_already_removed_result(result):
+                        self.log.info(
+                            "btmgmt advertisement was already removed: adapter=%s instance=%s",
+                            adapter_name,
+                            instance,
+                        )
+                    else:
+                        self._log_btmgmt_failure("rm-adv", result)
+                else:
+                    self.log.info(
+                        "btmgmt advertisement removed: adapter=%s instance=%s",
+                        adapter_name,
+                        instance,
+                    )
         except BLEBackendUnavailable as exc:
             self.log.error(
                 "btmgmt rm-adv could not run: adapter=%s instance=%s error=%s",
@@ -337,7 +418,35 @@ class BlueZGattServer:
             )
         finally:
             self._btmgmt_instance = None
+            await self._restore_btmgmt_adapter_name(adapter_name)
             self._btmgmt_adapter = None
+
+    async def _restore_btmgmt_adapter_name(self, adapter_name: str):
+        original_name = self._original_adapter_name
+        original_short_name = self._original_adapter_short_name
+        try:
+            if self._btmgmt_name_changed and original_name:
+                result = await self._run_btmgmt(
+                    btmgmt_name_command(adapter_name, original_name, original_short_name)
+                )
+                if result.returncode != 0:
+                    self._log_btmgmt_failure("restore-name", result)
+                else:
+                    self.log.info(
+                        "Bluetooth adapter name restored: adapter=%s name=%s",
+                        adapter_name,
+                        original_name,
+                    )
+        except BLEBackendUnavailable as exc:
+            self.log.error(
+                "Bluetooth adapter name restoration skipped: adapter=%s error=%s",
+                adapter_name,
+                exc,
+            )
+        finally:
+            self._btmgmt_name_changed = False
+            self._original_adapter_name = None
+            self._original_adapter_short_name = ""
 
     async def _run_btmgmt(self, command: list[str]):
         try:
@@ -363,6 +472,14 @@ class BlueZGattServer:
             result.returncode,
             _safe_process_output(result.stdout),
             _safe_process_output(result.stderr),
+        )
+
+    def _raise_btmgmt_failure(self, action: str, result):
+        self._log_btmgmt_failure(action, result)
+        if _is_permission_denied_result(result):
+            raise BLEBackendUnavailable(BTMGMT_PERMISSION_MESSAGE)
+        raise BLEBackendUnavailable(
+            f"btmgmt {action} 실행에 실패했습니다 (return code {result.returncode})."
         )
 
     async def _register_advertisement_with_fallback(self):
@@ -475,6 +592,20 @@ def _safe_process_output(value: Any, limit: int = 2000) -> str:
         text,
     )
     return text if len(text) <= limit else f"{text[:limit]}...<truncated>"
+
+
+def _process_result_text(result) -> str:
+    return f"{_safe_process_output(result.stdout)} {_safe_process_output(result.stderr)}".lower()
+
+
+def _is_permission_denied_result(result) -> bool:
+    output = _process_result_text(result)
+    return "permission denied" in output or "status 0x14" in output
+
+
+def _is_already_removed_result(result) -> bool:
+    output = _process_result_text(result)
+    return any(marker in output for marker in ("not found", "does not exist", "no such", "invalid parameters"))
 
 
 def _build_dbus_classes(api):
