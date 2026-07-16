@@ -95,6 +95,22 @@ def test_configure_wifi_updates_wifi_manager_without_password():
     assert not contains_key(manager.get_status(), "password")
 
 
+def test_prepare_configure_sets_intermediate_state_before_wifi_execution():
+    manager, wifi_manager = make_manager()
+    prepared = manager.prepare_gatt_configure({
+        "type": "configure_wifi", "client_id": "phone-001",
+        "ssid": "MyWifi", "password": "mypassword123",
+    })
+
+    assert prepared["ok"] is True
+    assert manager.get_status()["provisioning_state"] == "WIFI_CONFIG_RECEIVED"
+    assert wifi_manager.get_status()["last_configured_ssid"] is None
+
+    response = manager.execute_gatt_configure(prepared)
+    assert response["ok"] is True
+    assert prepared["password"] is None
+
+
 def test_status_message_includes_ble_and_wifi():
     manager, _ = make_manager()
 

@@ -7,10 +7,11 @@ This repository currently has no Flutter project. This guide defines the client 
 | Item | Value / properties |
 | --- | --- |
 | Device name | `VisionPoseCoach-Pi` |
-| Advertisement local name | `VPC-Pi` when included; it may be absent after BlueZ fallback |
+| Advertisement local name | `VPC-Pi`; the tested btmgmt backend includes the adapter local name with `-n` |
 | Service | `9f4c0001-7d9a-4b57-9d9f-000000000001` |
 | WiFi Configure | `9f4c0002-7d9a-4b57-9d9f-000000000002` / Write |
 | Status | `9f4c0003-7d9a-4b57-9d9f-000000000003` / Read, Notify |
+| WiFi Scan | `9f4c0005-7d9a-4b57-9d9f-000000000005` / Read, Write, Notify |
 | Hello / Device Info | `9f4c0004-7d9a-4b57-9d9f-000000000004` / Read only |
 
 Hello is read-only. Do not send a hello JSON. Configure is one complete UTF-8 JSON write, currently limited to 512 bytes:
@@ -43,12 +44,43 @@ On iOS add `NSBluetoothAlwaysUsageDescription` to `Info.plist` (and the older pe
 ## Client flow
 
 1. Confirm Bluetooth permission and adapter state.
-2. Scan by service UUID. Use `VPC-Pi`, when visible, only as an additional hint rather than the primary filter.
+2. Find `VPC-Pi` in the BLE scan results.
 3. Connect with a timeout and discover services.
-4. Read Hello / Device Info and use its full `device_name` and `service_uuid` for final verification.
+4. Verify the VisionPoseCoach Service UUID during discovery, then read Hello / Device Info and use its full `device_name` and `service_uuid` for final verification.
 5. Subscribe to Status notifications, then perform one Status read.
 6. Encode and write the configure JSON with response.
 7. Decode status notifications until `WIFI_CONNECTED` or `FAILED`.
+
+## Wi-Fi scan flow
+
+Subscribe to notifications on WiFi Scan (`9f4c0005-7d9a-4b57-9d9f-000000000005`) **before** writing the request. Flutter writes exactly once for each refresh; the Raspberry Pi runs one scan and returns the result through multiple notifications. `request_id` identifies every event belonging to that refresh and should be newly generated for a later refresh.
+
+Request (one Write):
+
+```json
+{"type":"scan_wifi","request_id":"scan-001"}
+```
+
+Response sequence (multiple Notify values):
+
+```json
+{"t":"started","r":"scan-001"}
+{"t":"begin","r":"scan-001","n":1}
+{"t":"net","r":"scan-001","i":0,"n":1,"s":"robotA5G","g":100,"e":"WPA2","p":1}
+{"t":"end","r":"scan-001","n":1}
+```
+
+`p` is `1` when a password is required and `0` for an open network. Read returns only the latest event/current state, such as `{"t":"idle"}` or the last `end`; it never returns the whole network list. A second request while scanning returns `{"t":"error","r":"scan-002","c":"scan_busy"}`. A scan failure returns `scan_failed`. Requests made without enabling Notify are rejected safely and logged by the Raspberry Pi.
+
+After the user selects an SSID, subscribe to Status and write the existing WiFi Configure characteristic once:
+
+```json
+{"type":"configure_wifi","client_id":"phone-001","ssid":"robotA5G","password":"user-entered-password"}
+```
+
+Continue reading/listening to Status (`9f4c0003-7d9a-4b57-9d9f-000000000003`) for `WIFI_CONFIGURING`, followed by `WIFI_CONNECTED` or `FAILED`.
+
+The app must subscribe to Status Notify before writing SSID/password to Configure. On `WIFI_CONFIGURING`, show the connecting UI. On `WIFI_CONNECTED`, stop BLE and switch to the Wi-Fi HTTP connection. On `FAILED`, show password re-entry or retry UI. A repeated Configure write while configuration is active is rejected and never starts a second `nmcli` operation.
 8. Disconnect BLE on either terminal state.
 9. On success, discover/use the Pi IP and call `/network/status` or `/health` over WiFi.
 10. Use HTTP/WebSocket/MJPG, not BLE, for measurement data.

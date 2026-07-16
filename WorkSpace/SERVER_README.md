@@ -216,9 +216,16 @@ sudo -E env VPC_WIFI_MODE=real \
   --advertising-instance 1
 ```
 
-In `auto`, the server first tries D-Bus advertising and falls back to `btmgmt add-adv` when BlueZ returns `org.bluez.Error.Failed`. `--advertising-backend dbus` disables that fallback; `--advertising-backend btmgmt` selects it immediately. GATT remains registered through D-Bus in every mode. The `btmgmt` advertisement contains the 128-bit Service UUID but omits local name to stay within the legacy advertisement size limit. The successful advertising instance is removed with `btmgmt rm-adv` on shutdown; do not reuse the same instance from another process while the server is running.
+In `auto`, the server first tries D-Bus advertising and falls back to `btmgmt add-adv` when BlueZ returns `org.bluez.Error.Failed`. `--advertising-backend dbus` disables that fallback; `--advertising-backend btmgmt` selects it immediately. GATT remains registered through D-Bus in every mode. Before `btmgmt add-adv -c -g -n`, the server saves the adapter name and sets it to `--advertise-name`, so iPhone scanners show `VPC-Pi`. The successful advertising instance is removed with `btmgmt rm-adv` on shutdown, then the original adapter name is restored when possible. Do not reuse the same instance from another process while the server is running.
 
-`VPC_WIFI_MODE=real` changes the Raspberry Pi WiFi connection and may disconnect the current SSH session. Scan by the Service UUID; the optional local name is `VPC-Pi` and may be absent or adapter-managed under `btmgmt`. Confirm the full `VisionPoseCoach-Pi` name by reading Hello / Device Info after connecting. If no matching service is visible, check `bluetooth.service`, `rfkill`, `Powered: yes`, `btmgmt info`, and whether the selected advertising instance is already occupied. If GATT registration fails, check the BlueZ version, adapter support, system D-Bus policy, and `journalctl -u bluetooth`. A passing pytest run does not verify actual advertising registration, so always perform the scan/connect/read check on Raspberry Pi hardware. If WiFi configuration fails, confirm the SSID with `nmcli device wifi list` and inspect NetworkManager status. Do not place a password in diagnostic commands, logs, screenshots, or issue reports.
+`VPC_WIFI_MODE=real` changes the Raspberry Pi WiFi connection and may disconnect the current SSH session. On the tested Raspberry Pi kernel `6.12.93+rpt-rpi-2712` with BlueZ 5.66, D-Bus advertising failed with `InvalidParameters (0x0d)`, while privileged `btmgmt` advertising succeeded and displayed `VPC-Pi` on iPhone when `-n` was present. If btmgmt reports `Permission Denied`, run the command with `sudo` as shown above. Confirm the service UUID through GATT Service Discovery and the full `VisionPoseCoach-Pi` name by reading Hello / Device Info. If no matching device is visible, check `bluetooth.service`, `rfkill`, `Powered: yes`, `btmgmt info`, and whether the selected advertising instance is already occupied. A passing pytest run does not verify actual advertising registration, so always perform the scan/connect/read check on Raspberry Pi hardware. Do not place a password in diagnostic commands, logs, screenshots, or issue reports.
+
+Expected successful btmgmt logs include:
+
+```text
+btmgmt advertisement registered: adapter=hci0 instance=1 service_uuid=9f4c0001-7d9a-4b57-9d9f-000000000001 advertise_name=VPC-Pi
+BLE GATT provisioning started: device_name=VisionPoseCoach-Pi advertise_name=VPC-Pi advertising_backend=btmgmt
+```
 
 Mock provisioning message example:
 

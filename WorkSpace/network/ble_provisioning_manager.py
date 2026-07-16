@@ -54,6 +54,9 @@ class BLEProvisioningManager:
         self._provisioning_state = self.STATE_NOT_STARTED
         self._provisioning_completed = False
         self._last_error = None
+        self._wifi_config_busy = False
+        self._wifi_config_executing = False
+        self._active_wifi_config_token = None
 
     def validate_configure_payload(self, payload):
         """Validate a GATT configure write without retaining credentials."""
@@ -64,6 +67,13 @@ class BLEProvisioningManager:
                 "ok": False,
                 "error_code": "INVALID_MESSAGE_TYPE",
                 "message": "type은 configure_wifi여야 합니다.",
+            }
+        client_id = payload.get("client_id")
+        if not isinstance(client_id, str) or not client_id.strip():
+            return {
+                "ok": False,
+                "error_code": "INVALID_CLIENT_ID",
+                "message": "client_id는 비어 있지 않은 문자열이어야 합니다.",
             }
         validation = self.wifi_manager.validate_wifi_payload(
             {"ssid": payload.get("ssid"), "password": payload.get("password")}
@@ -78,12 +88,80 @@ class BLEProvisioningManager:
 
     def handle_gatt_configure(self, payload):
         """Process a real GATT write through the same WiFiManager as HTTP."""
+        prepared = self.prepare_gatt_configure(payload)
+        if not prepared.get("ok"):
+            return prepared
+        return self.execute_gatt_configure(prepared)
+
+    def prepare_gatt_configure(self, payload):
+        """Validate and reserve a configure request without starting Wi-Fi I/O."""
         validation = self.validate_configure_payload(payload)
+        message_type = payload.get("type") if isinstance(payload, dict) else None
         if not validation["ok"]:
-            return self._error_response(
-                validation["error_code"], validation["message"], payload.get("type") if isinstance(payload, dict) else None
-            )
-        return self.handle_provisioning_message(payload)
+            return self._error_response(validation["error_code"], validation["message"], message_type)
+
+        with self._lock:
+            if self._wifi_config_busy:
+                return {
+                    "type": "ble_provisioning_response",
+                    "ok": False,
+                    "message_type": "configure_wifi",
+                    "provisioning_state": self._provisioning_state,
+                    "provisioning_completed": self._provisioning_completed,
+                    "next_step": self._next_step(self._provisioning_state),
+                    "error_code": "WIFI_CONFIG_BUSY",
+                    "message": "WiFi 설정 작업이 이미 진행 중입니다.",
+                }
+            self._wifi_config_busy = True
+            token = object()
+            self._active_wifi_config_token = token
+            self._last_client_id = payload["client_id"].strip()
+            self._last_message_type = "configure_wifi"
+            self._provisioning_state = self.STATE_WIFI_CONFIG_RECEIVED
+            self._provisioning_completed = False
+            self._last_error = None
+
+        return {
+            "ok": True,
+            "client_id": payload["client_id"].strip(),
+            "ssid": payload["ssid"],
+            "password": payload["password"],
+            "_token": token,
+        }
+
+    def execute_gatt_configure(self, prepared):
+        """Run the reserved Wi-Fi operation and publish its terminal state."""
+        if not isinstance(prepared, dict) or not prepared.get("ok"):
+            return prepared
+        token = prepared.get("_token")
+        with self._lock:
+            if token is not self._active_wifi_config_token or self._wifi_config_executing:
+                return {
+                    "type": "ble_provisioning_response",
+                    "ok": False,
+                    "message_type": "configure_wifi",
+                    "provisioning_state": self._provisioning_state,
+                    "provisioning_completed": self._provisioning_completed,
+                    "next_step": self._next_step(self._provisioning_state),
+                    "error_code": "WIFI_CONFIG_BUSY",
+                    "message": "WiFi 설정 작업이 이미 진행 중이거나 만료되었습니다.",
+                }
+            self._wifi_config_executing = True
+        ssid = prepared["ssid"]
+        password = prepared["password"]
+        try:
+            try:
+                wifi_result = self.wifi_manager.configure_wifi(ssid, password)
+            except Exception:
+                wifi_result = {"ok": False, "message": "WiFi 설정 요청 처리에 실패했습니다."}
+            return self._finish_configure_wifi(wifi_result, password)
+        finally:
+            prepared["password"] = None
+            with self._lock:
+                if token is self._active_wifi_config_token:
+                    self._wifi_config_busy = False
+                    self._wifi_config_executing = False
+                    self._active_wifi_config_token = None
 
     def get_status(self):
         wifi_status = self._wifi_status()
@@ -258,18 +336,19 @@ class BLEProvisioningManager:
         return payload
 
     def _handle_configure_wifi(self, payload):
-        ssid = payload.get("ssid")
-        password = payload.get("password")
-        with self._lock:
-            self._provisioning_state = self.STATE_WIFI_CONFIG_RECEIVED
-        wifi_result = self.wifi_manager.configure_wifi(ssid, password)
+        return self.handle_gatt_configure(payload)
+
+    def _finish_configure_wifi(self, wifi_result, password):
         ok = bool(wifi_result.get("ok"))
+        message = wifi_result.get("message", "WiFi 설정 요청 처리에 실패했습니다.")
+        if isinstance(password, str) and password:
+            message = str(message).replace(password, "***")
 
         with self._lock:
             self._advertising = False if ok else self._advertising
             self._provisioning_state = self.STATE_COMPLETED if ok else self.STATE_ERROR
             self._provisioning_completed = ok
-            self._last_error = None if ok else wifi_result.get("message")
+            self._last_error = None if ok else message
 
         current_state = self.get_status()["provisioning_state"]
         response = {
@@ -282,7 +361,7 @@ class BLEProvisioningManager:
             "message": (
                 "WiFi 설정 요청을 처리했습니다."
                 if ok
-                else wifi_result.get("message", "WiFi 설정 요청 처리에 실패했습니다.")
+                else message
             ),
             "wifi": self._wifi_status(),
         }

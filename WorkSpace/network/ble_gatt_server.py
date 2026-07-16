@@ -32,10 +32,14 @@ SERVICE_UUID = "9f4c0001-7d9a-4b57-9d9f-000000000001"
 WIFI_CONFIG_UUID = "9f4c0002-7d9a-4b57-9d9f-000000000002"
 STATUS_UUID = "9f4c0003-7d9a-4b57-9d9f-000000000003"
 HELLO_UUID = "9f4c0004-7d9a-4b57-9d9f-000000000004"
+WIFI_SCAN_UUID = "9f4c0005-7d9a-4b57-9d9f-000000000005"
 MAX_WRITE_BYTES = 512
+MAX_SCAN_NETWORKS = 15
+MAX_NOTIFY_BYTES = 180
 WIFI_CONFIG_FLAGS = ("write",)
 STATUS_FLAGS = ("read", "notify")
 HELLO_FLAGS = ("read",)
+WIFI_SCAN_FLAGS = ("read", "write", "notify")
 
 BLUEZ_SERVICE = "org.bluez"
 ADAPTER_IFACE = "org.bluez.Adapter1"
@@ -48,6 +52,7 @@ SERVICE_PATH = f"{APP_PATH}/service0"
 CONFIG_PATH = f"{SERVICE_PATH}/char0"
 STATUS_PATH = f"{SERVICE_PATH}/char1"
 HELLO_PATH = f"{SERVICE_PATH}/char2"
+SCAN_PATH = f"{SERVICE_PATH}/char3"
 ADVERTISEMENT_PATH = f"{APP_PATH}/advertisement0"
 
 
@@ -137,6 +142,59 @@ def decode_configure_write(value: bytes | bytearray | list[int]) -> dict[str, An
     return payload
 
 
+def decode_scan_write(value: bytes | bytearray | list[int]) -> dict[str, str]:
+    """Decode and validate one Wi-Fi scan command without accepting credentials."""
+    payload = decode_configure_write(value)
+    if payload.get("type") != "scan_wifi":
+        raise ValueError("type은 scan_wifi여야 합니다.")
+    request_id = payload.get("request_id")
+    if not isinstance(request_id, str) or not request_id.strip():
+        raise ValueError("request_id는 비어 있지 않은 문자열이어야 합니다.")
+    if len(request_id.encode("utf-8")) > 64:
+        raise ValueError("request_id는 UTF-8 기준 64바이트 이하여야 합니다.")
+    return {"type": "scan_wifi", "request_id": request_id.strip()}
+
+
+def _truncate_utf8(value: Any, max_bytes: int) -> str:
+    raw = str(value or "").encode("utf-8")[:max_bytes]
+    return raw.decode("utf-8", errors="ignore")
+
+
+def build_scan_events(
+    request_id: str, networks: list[dict[str, Any]], limit: int = MAX_SCAN_NETWORKS
+) -> list[dict[str, Any]]:
+    """Build compact, ordered and bounded notification payloads."""
+    normalized = []
+    for network in networks:
+        ssid = str(network.get("ssid") or "").strip()
+        if not ssid:
+            continue
+        try:
+            signal = max(0, min(100, int(network.get("signal", 0))))
+        except (TypeError, ValueError):
+            signal = 0
+        normalized.append((signal, network, ssid))
+    normalized.sort(key=lambda item: item[0], reverse=True)
+    normalized = normalized[:limit]
+    total = len(normalized)
+    events: list[dict[str, Any]] = [
+        {"t": "started", "r": request_id},
+        {"t": "begin", "r": request_id, "n": total},
+    ]
+    for index, (signal, network, ssid) in enumerate(normalized):
+        event = {
+            "t": "net", "r": request_id, "i": index, "n": total,
+            "s": _truncate_utf8(ssid, 64), "g": signal,
+            "e": _truncate_utf8(network.get("security", ""), 32),
+            "p": 1 if network.get("secured") else 0,
+        }
+        while len(encode_json(event)) > MAX_NOTIFY_BYTES and event["s"]:
+            event["s"] = _truncate_utf8(event["s"], len(event["s"].encode("utf-8")) - 1)
+        events.append(event)
+    events.append({"t": "end", "r": request_id, "n": total})
+    return events
+
+
 class BlueZGattServer:
     """Registers one provisioning service and advertisement with BlueZ."""
 
@@ -176,6 +234,9 @@ class BlueZGattServer:
         self._original_adapter_short_name = ""
         self._btmgmt_name_changed = False
         self._status_characteristic = None
+        self._scan_characteristic = None
+        self._scan_task = None
+        self._scan_state: dict[str, Any] = {"t": "idle"}
         self._stopped = asyncio.Event()
 
     def status_payload(self) -> dict[str, Any]:
@@ -217,6 +278,8 @@ class BlueZGattServer:
         )
 
     async def stop(self):
+        if self._scan_task and not self._scan_task.done():
+            self._scan_task.cancel()
         await self._stop_btmgmt_advertising()
         if self._bus is None:
             self._stopped.set()
@@ -285,17 +348,25 @@ class BlueZGattServer:
             list(HELLO_FLAGS),
             read=lambda: encode_json(hello_payload(self.device_name)),
         )
-        service = classes["Service"](SERVICE_PATH, SERVICE_UUID, [CONFIG_PATH, STATUS_PATH, HELLO_PATH])
+        self._scan_characteristic = classes["Characteristic"](
+            SCAN_PATH, WIFI_SCAN_UUID, SERVICE_PATH, list(WIFI_SCAN_FLAGS),
+            read=lambda: encode_json(self._scan_state), write=self._on_scan_write,
+        )
+        service = classes["Service"](
+            SERVICE_PATH, SERVICE_UUID, [CONFIG_PATH, STATUS_PATH, HELLO_PATH, SCAN_PATH]
+        )
         app = classes["Application"]({
             SERVICE_PATH: service,
             CONFIG_PATH: config,
             STATUS_PATH: self._status_characteristic,
             HELLO_PATH: hello,
+            SCAN_PATH: self._scan_characteristic,
         })
         self._advertisement = classes["Advertisement"](ADVERTISEMENT_PATH, self.advertise_name)
         for path, interface in [
             (APP_PATH, app), (SERVICE_PATH, service), (CONFIG_PATH, config),
             (STATUS_PATH, self._status_characteristic), (HELLO_PATH, hello),
+            (SCAN_PATH, self._scan_characteristic),
             (ADVERTISEMENT_PATH, self._advertisement),
         ]:
             self._bus.export(path, interface)
@@ -541,13 +612,61 @@ class BlueZGattServer:
         asyncio.create_task(self._configure_wifi(payload))
 
     async def _configure_wifi(self, payload):
-        # nmcli is blocking; keep the D-Bus event loop responsive.
-        await asyncio.to_thread(self.manager.handle_gatt_configure, payload)
+        prepared = self.manager.prepare_gatt_configure(payload)
+        if not prepared.get("ok"):
+            self._notify_status()
+            return
+
+        # Preparation has already made Status WIFI_CONFIGURING. Notify before
+        # moving the blocking nmcli operation off the D-Bus event loop.
+        self._notify_status()
+        await asyncio.to_thread(self.manager.execute_gatt_configure, prepared)
         self._notify_status()
 
     def _notify_status(self):
         if self._status_characteristic:
             self._status_characteristic.update_value(encode_json(self.status_payload()))
+
+    def _on_scan_write(self, value):
+        try:
+            request = decode_scan_write(value)
+        except ValueError as exc:
+            self.log.warning("Invalid Wi-Fi scan request: %s", exc)
+            return
+        request_id = request["request_id"]
+        if not self._scan_characteristic or not self._scan_characteristic.notifying:
+            self._scan_state = {"t": "error", "r": request_id, "c": "notify_required"}
+            self.log.warning(
+                "Wi-Fi scan rejected because Notify is not enabled: request_id=%s", request_id
+            )
+            return
+        if self._scan_task and not self._scan_task.done():
+            self._emit_scan_event({"t": "error", "r": request_id, "c": "scan_busy"})
+            return
+        self._scan_task = asyncio.create_task(self._scan_wifi(request_id))
+
+    async def _scan_wifi(self, request_id: str):
+        self._emit_scan_event({"t": "started", "r": request_id})
+        try:
+            result = await asyncio.to_thread(self.manager.wifi_manager.list_networks)
+            if not result.get("ok"):
+                self._emit_scan_event({"t": "error", "r": request_id, "c": "scan_failed"})
+                self.log.warning("Wi-Fi scan failed: request_id=%s", request_id)
+                return
+            events = build_scan_events(request_id, result.get("networks") or [])
+            for event in events[1:]:  # started was sent before the blocking scan.
+                self._emit_scan_event(event)
+                await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._emit_scan_event({"t": "error", "r": request_id, "c": "scan_failed"})
+            self.log.exception("Wi-Fi scan failed safely: request_id=%s error=%s", request_id, type(exc).__name__)
+
+    def _emit_scan_event(self, event: dict[str, Any]):
+        self._scan_state = event
+        if self._scan_characteristic:
+            self._scan_characteristic.update_value(encode_json(event))
 
 
 def _load_dbus_api():

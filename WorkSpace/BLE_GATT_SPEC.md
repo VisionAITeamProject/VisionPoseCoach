@@ -17,7 +17,7 @@ The `/provisioning/ble/*` FastAPI endpoints remain HTTP mock/debug APIs only. Re
 ## Device
 
 - Device Name (Hello / Device Info): `VisionPoseCoach-Pi`
-- Advertisement Local Name: `VPC-Pi` by default; it may be absent when BlueZ requires the Service UUID-only fallback.
+- Advertisement Local Name: `VPC-Pi` by default. The `btmgmt` backend temporarily sets the adapter name and uses `add-adv -n` so iPhone scanners display it.
 - Role: Raspberry Pi BLE peripheral / GATT server
 - Client: Flutter mobile app BLE central
 
@@ -94,14 +94,17 @@ Real GATT state values are `IDLE`, `ADVERTISING`, `CONNECTED`, `WIFI_CONFIGURING
 
 ## Flutter Flow
 
-1. Scan for the Provisioning Service UUID. Treat the optional local name `VPC-Pi` only as a hint.
+WiFi Scan characteristic: `9f4c0005-7d9a-4b57-9d9f-000000000005` (`Read`, `Write`, `Notify`). Subscribe first, then write one `{"type":"scan_wifi","request_id":"scan-001"}` request. The server sends multiple compact `started`, `begin`, `net`, and `end` notifications carrying the same `request_id`; errors use `{"t":"error","r":"scan-001","c":"scan_failed"}` (or `scan_busy`). See `docs/FLUTTER_BLE_INTEGRATION.md` for the complete field contract.
+
+1. Scan for the local name `VPC-Pi`.
 2. Connect and discover the provisioning service.
-3. Read Hello / Device Info and verify the device name.
-4. Subscribe to Status notifications, then read Status once.
-5. UTF-8 encode the configure JSON and write it to WiFi Configure.
-6. Wait for `WIFI_CONNECTED`; on failure display `last_error` and allow retry.
-7. Disconnect BLE and verify `/network/status` or `/health` over Wi-Fi.
-8. Use HTTP/WebSocket/MJPG over Wi-Fi for all measurement traffic.
+3. Verify the Provisioning Service UUID during GATT Service Discovery.
+4. Read Hello / Device Info and verify the full device name.
+5. Subscribe to Status notifications, then read Status once.
+6. UTF-8 encode the configure JSON and write it to WiFi Configure.
+7. Wait for `WIFI_CONNECTED`; on failure display `last_error` and allow retry.
+8. Disconnect BLE and verify `/network/status` or `/health` over Wi-Fi.
+9. Use HTTP/WebSocket/MJPG over Wi-Fi for all measurement traffic.
 
 ## Write Size Limitation
 
@@ -127,8 +130,9 @@ Advertising backend behavior:
 
 - `auto` (default): try D-Bus advertising first. If BlueZ returns `org.bluez.Error.Failed`, start `btmgmt` advertising on the same `hciN` adapter.
 - `dbus`: use only `org.bluez.LEAdvertisingManager1`; no `btmgmt` fallback.
-- `btmgmt`: keep GATT Application registration on D-Bus, but run `btmgmt add-adv` for a connectable/general-discoverable advertisement containing the 128-bit Service UUID. Local name is omitted to avoid exceeding the legacy advertisement size limit.
+- `btmgmt`: keep GATT Application registration on D-Bus. Read and save the adapter name, temporarily set it to `advertise_name`, then run `btmgmt add-adv -c -g -n -u <service_uuid> <instance>`.
 - A successful `btmgmt` instance number is retained and removed with `btmgmt rm-adv` during Ctrl+C, SIGTERM, startup failure cleanup, or normal shutdown.
+- After advertisement removal, restore the saved adapter name when possible. Restoration failure is logged but does not prevent server shutdown.
 - `btmgmt` requires sufficient Bluetooth management privileges, so the Raspberry Pi command normally runs under `sudo`.
 
 Direct Raspberry Pi fallback example:
@@ -143,3 +147,10 @@ sudo -E env VPC_WIFI_MODE=mock \
 ```
 
 Unit tests verify the advertisement property contract, but BlueZ registration behavior depends on the Raspberry Pi adapter, firmware, and BlueZ version. A successful `pytest` run does not replace an on-device scan/connect/read test.
+
+## iOS Peripheral Identifier vs Service UUID
+
+An iPhone BLE scanner may display a value such as `6698a28f-834f-4978-37f0-05b5e3ec3f7b`. This can be an iOS Peripheral Identifier assigned to distinguish the peripheral in that iOS environment. It is not the VisionPoseCoach Service UUID and must not replace the UUID constants in this document.
+
+- iOS Peripheral Identifier: an iOS-side identifier for the BLE peripheral; it may differ by device or iOS environment.
+- VisionPoseCoach Service UUID: `9f4c0001-7d9a-4b57-9d9f-000000000001`; verify it after connection through GATT Service Discovery.
