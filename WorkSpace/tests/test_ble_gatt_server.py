@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 from network.ble_gatt_server import (
     ADVERTISE_NAME, DEVICE_NAME, HELLO_FLAGS, HELLO_UUID, MAX_WRITE_BYTES,
     SERVICE_UUID, STATUS_UUID, WIFI_CONFIG_UUID, WIFI_SCAN_FLAGS, WIFI_SCAN_UUID,
+    NETWORK_INFO_FLAGS, NETWORK_INFO_UUID, NETWORK_INTERFACE,
     MAX_NOTIFY_BYTES, MAX_SCAN_NETWORKS, BLEBackendUnavailable,
     BlueZGattServer, advertisement_properties,
     btmgmt_add_command, btmgmt_info_command, btmgmt_name_command,
@@ -45,6 +46,8 @@ def test_module_imports_without_starting_bluez():
     assert STATUS_UUID == "9f4c0003-7d9a-4b57-9d9f-000000000003"
     assert HELLO_UUID == "9f4c0004-7d9a-4b57-9d9f-000000000004"
     assert WIFI_SCAN_UUID == "9f4c0005-7d9a-4b57-9d9f-000000000005"
+    assert NETWORK_INFO_UUID == "9f4c0006-7d9a-4b57-9d9f-000000000006"
+    assert NETWORK_INFO_FLAGS == ("read", "notify")
     assert WIFI_SCAN_FLAGS == ("read", "write", "notify")
     assert HELLO_FLAGS == ("read",)
 
@@ -343,6 +346,111 @@ class FakeStatusCharacteristic:
 
     def update_value(self, value):
         self.values.append(json.loads(value))
+
+
+def test_network_info_read_payloads_and_port(monkeypatch):
+    monkeypatch.setenv("VPC_FASTAPI_PORT", "8123")
+    dry = BlueZGattServer(BLEProvisioningManager(WiFiManager(mode="dry_run"), mode="dry_run"))
+    assert dry.network_info_payload() == {
+        "ip": None, "host": dry.manager.wifi_manager.get_mdns_hostname(),
+        "port": 8123, "interface": NETWORK_INTERFACE,
+    }
+    mock = BlueZGattServer(BLEProvisioningManager(WiFiManager(mode="mock"), mode="mock"))
+    assert mock.network_info_payload() == {
+        "ip": "192.168.0.50", "host": "visionposecoach-mock.local",
+        "port": 8123, "interface": "wlan0",
+    }
+    assert len(encode_json(mock.network_info_payload())) <= MAX_NOTIFY_BYTES
+    assert "password" not in str(mock.network_info_payload()).lower()
+
+
+def test_network_info_real_uses_only_wlan0(monkeypatch):
+    wifi = WiFiManager(mode="real")
+    calls = []
+    def fake_run(command):
+        calls.append(command)
+        return {"ok": True, "stdout": "10.10.141.34/24\n2001:db8::1/64\n", "message": "ok"}
+    monkeypatch.setattr(wifi, "_run_nmcli", fake_run)
+    monkeypatch.setattr(wifi, "get_mdns_hostname", lambda: "raspi5-009.local")
+    server = BlueZGattServer(BLEProvisioningManager(wifi, mode="real"))
+    assert server.network_info_payload()["ip"] == "10.10.141.34"
+    assert calls == [["nmcli", "-g", "IP4.ADDRESS", "device", "show", "wlan0"]]
+
+
+def test_network_info_notify_follows_connected_status():
+    events = []
+    class RecordingCharacteristic:
+        notifying = True
+        def __init__(self, kind): self.kind = kind
+        def update_value(self, value): events.append((self.kind, json.loads(value)))
+
+    async def run():
+        manager = BLEProvisioningManager(WiFiManager(mode="mock"), mode="mock")
+        server = BlueZGattServer(manager)
+        server._status_characteristic = RecordingCharacteristic("status")
+        server._network_info_characteristic = RecordingCharacteristic("network")
+        await server._configure_wifi({
+            "type": "configure_wifi", "client_id": "phone-001",
+            "ssid": "Cafe", "password": "unit-test-secret",
+        })
+    asyncio.run(run())
+    assert [(kind, value.get("state")) for kind, value in events] == [
+        ("status", "WIFI_CONFIGURING"), ("status", "WIFI_CONNECTED"), ("network", None),
+    ]
+    assert events[-1][1]["ip"] == "192.168.0.50"
+    assert "unit-test-secret" not in str(events)
+
+
+def test_network_info_notify_disabled_is_safe():
+    manager = BLEProvisioningManager(WiFiManager(mode="mock"), mode="mock")
+    server = BlueZGattServer(manager)
+    server._network_info_characteristic = None
+    server._notify_network_info()
+
+
+def test_network_info_wait_retries_without_blocking_event_loop(monkeypatch):
+    manager = BLEProvisioningManager(WiFiManager(mode="real"), mode="real")
+    server = BlueZGattServer(manager)
+    values = iter([None, None, "10.10.141.34"])
+    monkeypatch.setattr(server, "network_info_payload", lambda: {
+        "ip": next(values), "host": "raspi.local", "port": 8000, "interface": "wlan0",
+    })
+    payload = asyncio.run(server._wait_for_interface_ipv4(attempts=5, delay_seconds=0))
+    assert payload["ip"] == "10.10.141.34"
+
+
+def test_network_info_wait_exhaustion_returns_null_ip(monkeypatch):
+    manager = BLEProvisioningManager(WiFiManager(mode="real"), mode="real")
+    server = BlueZGattServer(manager)
+    monkeypatch.setattr(server, "network_info_payload", lambda: {
+        "ip": None, "host": "raspi.local", "port": 8000, "interface": "wlan0",
+    })
+    payload = asyncio.run(server._wait_for_interface_ipv4(attempts=3, delay_seconds=0))
+    assert payload["ip"] is None
+
+
+def test_configure_failure_does_not_notify_stale_network_info():
+    events = []
+    class FailingWiFi(RecordingWiFi):
+        def configure_wifi(self, ssid, password):
+            return {"ok": False, "message": "connection failed"}
+    class RecordingCharacteristic:
+        notifying = True
+        def __init__(self, kind): self.kind = kind
+        def update_value(self, value): events.append((self.kind, json.loads(value)))
+
+    async def run():
+        manager = BLEProvisioningManager(FailingWiFi(), mode="mock")
+        server = BlueZGattServer(manager)
+        server._status_characteristic = RecordingCharacteristic("status")
+        server._network_info_characteristic = RecordingCharacteristic("network")
+        await server._configure_wifi({
+            "type": "configure_wifi", "client_id": "phone-001",
+            "ssid": "Cafe", "password": "unit-test-secret",
+        })
+    asyncio.run(run())
+    assert [kind for kind, _ in events] == ["status", "status"]
+    assert events[-1][1]["state"] == "FAILED"
 
 
 def test_scan_success_notifies_once_per_event():

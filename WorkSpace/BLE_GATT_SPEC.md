@@ -31,6 +31,18 @@ Use these UUIDs as the initial implementation contract. They can be changed befo
 | WiFi Configure Characteristic | `9f4c0002-7d9a-4b57-9d9f-000000000002` | Write |
 | Status Characteristic | `9f4c0003-7d9a-4b57-9d9f-000000000003` | Read, Notify |
 | Hello / Device Info Characteristic | `9f4c0004-7d9a-4b57-9d9f-000000000004` | Read |
+| WiFi Scan Characteristic | `9f4c0005-7d9a-4b57-9d9f-000000000005` | Read, Write, Notify |
+| Network Info Characteristic | `9f4c0006-7d9a-4b57-9d9f-000000000006` | Read, Notify |
+
+## Network Info
+
+Read returns the current endpoint and a successful Configure sends it after the `WIFI_CONNECTED` Status notification:
+
+```json
+{"ip":"10.10.141.34","host":"raspi5-009.local","port":8000,"interface":"wlan0"}
+```
+
+Real mode obtains only `wlan0` with `nmcli -g IP4.ADDRESS device show wlan0`, removes CIDR, rejects IPv6, and retries up to five times at 0.4-second intervals without blocking the D-Bus loop. Hostname is normalized to one `.local` suffix. `VPC_FASTAPI_PORT` selects the port and defaults to 8000. Mock mode uses `192.168.0.50` / `visionposecoach-mock.local`; dry-run keeps `ip=null` and uses the OS mDNS hostname. A successful Wi-Fi connection remains successful if DHCP is delayed beyond retries; Network Info then contains `ip=null` and can be read again. On Wi-Fi failure no Network Info notification is sent, preventing a stale IP from being treated as the failed attempt's result.
 
 ## Pi To App: Hello / Device Info
 
@@ -100,11 +112,12 @@ WiFi Scan characteristic: `9f4c0005-7d9a-4b57-9d9f-000000000005` (`Read`, `Write
 2. Connect and discover the provisioning service.
 3. Verify the Provisioning Service UUID during GATT Service Discovery.
 4. Read Hello / Device Info and verify the full device name.
-5. Subscribe to Status notifications, then read Status once.
+5. Subscribe to Status and Network Info notifications, then read Status once.
 6. UTF-8 encode the configure JSON and write it to WiFi Configure.
-7. Wait for `WIFI_CONNECTED`; on failure display `last_error` and allow retry.
-8. Disconnect BLE and verify `/network/status` or `/health` over Wi-Fi.
-9. Use HTTP/WebSocket/MJPG over Wi-Fi for all measurement traffic.
+7. Wait for `WIFI_CONFIGURING`, `WIFI_CONNECTED`, then Network Info; on failure display `last_error` and allow retry.
+8. If Network Info Notify was missed, Read it. Verify `http://ip:port/health` (or use `host` when IP is null).
+9. Disconnect BLE only after Network Info and `/health` succeed.
+10. Use HTTP/WebSocket/MJPG over Wi-Fi for all measurement traffic.
 
 ## Write Size Limitation
 
@@ -118,7 +131,7 @@ The server accepts one complete UTF-8 JSON write of at most 512 bytes. Applicati
 4. Reuse `BLEProvisioningManager.handle_gatt_configure(payload)` for validation and state handling.
 5. Route WiFi credentials to `WiFiManager.configure_wifi(ssid, password)`.
 6. Notify the Status Characteristic when provisioning state changes.
-7. After WiFi configuration, the app should check `/network/status` or `/health` over WiFi.
+7. After WiFi configuration, notify Status `WIFI_CONNECTED`, then Network Info, and check `/health` before BLE disconnect.
 
 Run the peripheral with explicit names when needed:
 
@@ -138,13 +151,15 @@ Advertising backend behavior:
 Direct Raspberry Pi fallback example:
 
 ```bash
-sudo -E env VPC_WIFI_MODE=mock \
+sudo -E env VPC_WIFI_MODE=real VPC_FASTAPI_PORT=8000 \
   /home/willtek/VisionPoseCoach/.venv/bin/python \
   tools/run_ble_gatt_server.py \
   --debug \
   --advertising-backend btmgmt \
   --advertising-instance 1
 ```
+
+For nRF Connect: connect to VisionPoseCoach, enable Notify on `0003` and `0006`, write credentials to `0002`, verify `WIFI_CONFIGURING` → `WIFI_CONNECTED` → Network Info, Read `0006` again, then run `curl http://<ip>:8000/health`. This hardware check is required in addition to unit tests.
 
 Unit tests verify the advertisement property contract, but BlueZ registration behavior depends on the Raspberry Pi adapter, firmware, and BlueZ version. A successful `pytest` run does not replace an on-device scan/connect/read test.
 

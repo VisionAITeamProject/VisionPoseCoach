@@ -9,6 +9,33 @@ sys.path.insert(0, str(ROOT))
 from network.wifi_manager import WiFiManager
 
 
+def test_interface_ipv4_removes_cidr_skips_ipv6_and_uses_requested_interface(monkeypatch):
+    manager = WiFiManager(mode="real")
+    calls = []
+    def fake_run(command):
+        calls.append(command)
+        return {"ok": True, "stdout": "2001:db8::1/64\n10.10.141.148/24\n10.10.141.150/24\n", "message": "ok"}
+    monkeypatch.setattr(manager, "_run_nmcli", fake_run)
+    assert manager.get_interface_ipv4("wlan0") == "10.10.141.148"
+    assert calls == [["nmcli", "-g", "IP4.ADDRESS", "device", "show", "wlan0"]]
+
+
+def test_interface_ipv4_failure_and_empty_output_return_none(monkeypatch):
+    manager = WiFiManager(mode="real")
+    monkeypatch.setattr(manager, "_run_nmcli", lambda command: {"ok": False, "stdout": "", "message": "failed"})
+    assert manager.get_interface_ipv4() is None
+    monkeypatch.setattr(manager, "_run_nmcli", lambda command: {"ok": True, "stdout": "", "message": "ok"})
+    assert manager.get_interface_ipv4() is None
+
+
+def test_mdns_hostname_suffix_is_added_once(monkeypatch):
+    manager = WiFiManager(mode="dry_run")
+    monkeypatch.setattr(manager, "_get_hostname", lambda: "raspi5-009")
+    assert manager.get_mdns_hostname() == "raspi5-009.local"
+    monkeypatch.setattr(manager, "_get_hostname", lambda: "raspi5-009.local")
+    assert manager.get_mdns_hostname() == "raspi5-009.local"
+
+
 def contains_key(payload, target_key):
     if isinstance(payload, dict):
         return any(key == target_key or contains_key(value, target_key) for key, value in payload.items())

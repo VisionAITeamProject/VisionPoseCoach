@@ -7,6 +7,7 @@ FastAPI and unit tests remain usable on machines without BlueZ or D-Bus.
 import asyncio
 import json
 import logging
+import os
 import re
 import subprocess
 from typing import Any
@@ -33,6 +34,7 @@ WIFI_CONFIG_UUID = "9f4c0002-7d9a-4b57-9d9f-000000000002"
 STATUS_UUID = "9f4c0003-7d9a-4b57-9d9f-000000000003"
 HELLO_UUID = "9f4c0004-7d9a-4b57-9d9f-000000000004"
 WIFI_SCAN_UUID = "9f4c0005-7d9a-4b57-9d9f-000000000005"
+NETWORK_INFO_UUID = "9f4c0006-7d9a-4b57-9d9f-000000000006"
 MAX_WRITE_BYTES = 512
 MAX_SCAN_NETWORKS = 15
 MAX_NOTIFY_BYTES = 180
@@ -40,6 +42,9 @@ WIFI_CONFIG_FLAGS = ("write",)
 STATUS_FLAGS = ("read", "notify")
 HELLO_FLAGS = ("read",)
 WIFI_SCAN_FLAGS = ("read", "write", "notify")
+NETWORK_INFO_FLAGS = ("read", "notify")
+DEFAULT_FASTAPI_PORT = 8000
+NETWORK_INTERFACE = "wlan0"
 
 BLUEZ_SERVICE = "org.bluez"
 ADAPTER_IFACE = "org.bluez.Adapter1"
@@ -53,6 +58,7 @@ CONFIG_PATH = f"{SERVICE_PATH}/char0"
 STATUS_PATH = f"{SERVICE_PATH}/char1"
 HELLO_PATH = f"{SERVICE_PATH}/char2"
 SCAN_PATH = f"{SERVICE_PATH}/char3"
+NETWORK_INFO_PATH = f"{SERVICE_PATH}/char4"
 ADVERTISEMENT_PATH = f"{APP_PATH}/advertisement0"
 
 
@@ -70,6 +76,15 @@ def backend_available() -> bool:
 
 def encode_json(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _resolve_fastapi_port(explicit_port: int | None = None) -> int:
+    value = explicit_port if explicit_port is not None else os.getenv("VPC_FASTAPI_PORT", DEFAULT_FASTAPI_PORT)
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_FASTAPI_PORT
+    return port if 1 <= port <= 65535 else DEFAULT_FASTAPI_PORT
 
 
 def advertisement_properties(advertise_name: str | None = ADVERTISE_NAME) -> dict[str, Any]:
@@ -207,6 +222,7 @@ class BlueZGattServer:
         advertising_instance: int = DEFAULT_ADVERTISING_INSTANCE,
         command_runner=None,
         logger=None,
+        fastapi_port: int | None = None,
     ):
         if advertising_backend not in ADVERTISING_BACKENDS:
             raise ValueError(f"지원하지 않는 advertising backend입니다: {advertising_backend}")
@@ -220,6 +236,7 @@ class BlueZGattServer:
         self.active_advertising_backend = None
         self.local_name_included = True
         self.log = logger or logging.getLogger(__name__)
+        self.fastapi_port = _resolve_fastapi_port(fastapi_port)
         self._command_runner = command_runner or subprocess.run
         self._bus = None
         self._adapter_path = None
@@ -235,6 +252,7 @@ class BlueZGattServer:
         self._btmgmt_name_changed = False
         self._status_characteristic = None
         self._scan_characteristic = None
+        self._network_info_characteristic = None
         self._scan_task = None
         self._scan_state: dict[str, Any] = {"t": "idle"}
         self._stopped = asyncio.Event()
@@ -260,6 +278,28 @@ class BlueZGattServer:
             "ssid": wifi.get("ssid") or wifi.get("last_configured_ssid"),
             "last_error": current.get("last_error"),
         }
+
+    def network_info_payload(self) -> dict[str, Any]:
+        """Return a compact, credential-free endpoint description for Flutter."""
+        wifi = self.manager.wifi_manager
+        if self.manager.mode == "mock":
+            ip = "192.168.0.50"
+            host = "visionposecoach-mock.local"
+        else:
+            ip = wifi.get_interface_ipv4(NETWORK_INTERFACE) if self.manager.mode == "real" else None
+            host = wifi.get_mdns_hostname()
+        return {"ip": ip, "host": host, "port": self.fastapi_port, "interface": NETWORK_INTERFACE}
+
+    async def _wait_for_interface_ipv4(self, attempts: int = 5, delay_seconds: float = 0.4):
+        if self.manager.mode != "real":
+            return self.network_info_payload()
+        payload = None
+        for attempt in range(attempts):
+            payload = await asyncio.to_thread(self.network_info_payload)
+            if payload["ip"] is not None or attempt == attempts - 1:
+                return payload
+            await asyncio.sleep(delay_seconds)
+        return payload
 
     async def start(self):
         api = _load_dbus_api()
@@ -352,8 +392,13 @@ class BlueZGattServer:
             SCAN_PATH, WIFI_SCAN_UUID, SERVICE_PATH, list(WIFI_SCAN_FLAGS),
             read=lambda: encode_json(self._scan_state), write=self._on_scan_write,
         )
+        self._network_info_characteristic = classes["Characteristic"](
+            NETWORK_INFO_PATH, NETWORK_INFO_UUID, SERVICE_PATH, list(NETWORK_INFO_FLAGS),
+            read=lambda: encode_json(self.network_info_payload()),
+        )
         service = classes["Service"](
-            SERVICE_PATH, SERVICE_UUID, [CONFIG_PATH, STATUS_PATH, HELLO_PATH, SCAN_PATH]
+            SERVICE_PATH, SERVICE_UUID,
+            [CONFIG_PATH, STATUS_PATH, HELLO_PATH, SCAN_PATH, NETWORK_INFO_PATH]
         )
         app = classes["Application"]({
             SERVICE_PATH: service,
@@ -361,12 +406,14 @@ class BlueZGattServer:
             STATUS_PATH: self._status_characteristic,
             HELLO_PATH: hello,
             SCAN_PATH: self._scan_characteristic,
+            NETWORK_INFO_PATH: self._network_info_characteristic,
         })
         self._advertisement = classes["Advertisement"](ADVERTISEMENT_PATH, self.advertise_name)
         for path, interface in [
             (APP_PATH, app), (SERVICE_PATH, service), (CONFIG_PATH, config),
             (STATUS_PATH, self._status_characteristic), (HELLO_PATH, hello),
             (SCAN_PATH, self._scan_characteristic),
+            (NETWORK_INFO_PATH, self._network_info_characteristic),
             (ADVERTISEMENT_PATH, self._advertisement),
         ]:
             self._bus.export(path, interface)
@@ -622,10 +669,19 @@ class BlueZGattServer:
         self._notify_status()
         await asyncio.to_thread(self.manager.execute_gatt_configure, prepared)
         self._notify_status()
+        if self.status_payload()["state"] == self.manager.BLE_STATE_WIFI_CONNECTED:
+            network_info = await self._wait_for_interface_ipv4()
+            self._notify_network_info(network_info)
 
     def _notify_status(self):
         if self._status_characteristic:
             self._status_characteristic.update_value(encode_json(self.status_payload()))
+
+    def _notify_network_info(self, payload=None):
+        if self._network_info_characteristic:
+            self._network_info_characteristic.update_value(
+                encode_json(payload if payload is not None else self.network_info_payload())
+            )
 
     def _on_scan_write(self, value):
         try:

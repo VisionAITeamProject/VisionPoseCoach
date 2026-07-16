@@ -1,4 +1,5 @@
 import os
+import ipaddress
 import socket
 import subprocess
 from threading import Lock
@@ -183,6 +184,31 @@ class WiFiManager:
         except OSError:
             return None
 
+    def get_mdns_hostname(self):
+        """Return the OS hostname in mDNS form without raising."""
+        hostname = self._get_hostname()
+        if not isinstance(hostname, str) or not hostname.strip():
+            return None
+        hostname = hostname.strip().rstrip(".")
+        return hostname if hostname.lower().endswith(".local") else f"{hostname}.local"
+
+    def get_interface_ipv4(self, interface: str = "wlan0"):
+        """Return the first valid IPv4 assigned to one specific interface."""
+        if not isinstance(interface, str) or not interface.strip():
+            return None
+        result = self._run_nmcli(["nmcli", "-g", "IP4.ADDRESS", "device", "show", interface])
+        if not result.get("ok"):
+            return None
+        for line in result.get("stdout", "").splitlines():
+            candidate = line.strip().split("/", 1)[0]
+            try:
+                address = ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            if address.version == 4:
+                return str(address)
+        return None
+
     def _get_local_ip(self):
         try:
             hostname = socket.gethostname()
@@ -281,7 +307,7 @@ class WiFiManager:
             self._ssid = ssid
             self._last_error = last_error
 
-        local_ip = self._get_hostname_ip()
+        local_ip = self.get_interface_ipv4("wlan0")
         return {
             "type": "wifi_status",
             "mode": self.mode,

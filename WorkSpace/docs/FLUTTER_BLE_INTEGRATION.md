@@ -12,6 +12,7 @@ This repository currently has no Flutter project. This guide defines the client 
 | WiFi Configure | `9f4c0002-7d9a-4b57-9d9f-000000000002` / Write |
 | Status | `9f4c0003-7d9a-4b57-9d9f-000000000003` / Read, Notify |
 | WiFi Scan | `9f4c0005-7d9a-4b57-9d9f-000000000005` / Read, Write, Notify |
+| Network Info | `9f4c0006-7d9a-4b57-9d9f-000000000006` / Read, Notify |
 | Hello / Device Info | `9f4c0004-7d9a-4b57-9d9f-000000000004` / Read only |
 
 Hello is read-only. Do not send a hello JSON. Configure is one complete UTF-8 JSON write, currently limited to 512 bytes:
@@ -47,9 +48,11 @@ On iOS add `NSBluetoothAlwaysUsageDescription` to `Info.plist` (and the older pe
 2. Find `VPC-Pi` in the BLE scan results.
 3. Connect with a timeout and discover services.
 4. Verify the VisionPoseCoach Service UUID during discovery, then read Hello / Device Info and use its full `device_name` and `service_uuid` for final verification.
-5. Subscribe to Status notifications, then perform one Status read.
-6. Encode and write the configure JSON with response.
-7. Decode status notifications until `WIFI_CONNECTED` or `FAILED`.
+5. Subscribe to Status (`0003`) and Network Info (`0006`) notifications, then read Status once.
+6. Encode and write the configure JSON to Configure (`0002`) with response.
+7. Receive `WIFI_CONFIGURING`, then `WIFI_CONNECTED`, then Network Info.
+8. Call `http://ip:port/health` (fall back to `host` when `ip` is null).
+9. Disconnect BLE only after Network Info is available and `/health` succeeds; then use HTTP/WebSocket/MJPG.
 
 ## Wi-Fi scan flow
 
@@ -80,10 +83,15 @@ After the user selects an SSID, subscribe to Status and write the existing WiFi 
 
 Continue reading/listening to Status (`9f4c0003-7d9a-4b57-9d9f-000000000003`) for `WIFI_CONFIGURING`, followed by `WIFI_CONNECTED` or `FAILED`.
 
-The app must subscribe to Status Notify before writing SSID/password to Configure. On `WIFI_CONFIGURING`, show the connecting UI. On `WIFI_CONNECTED`, stop BLE and switch to the Wi-Fi HTTP connection. On `FAILED`, show password re-entry or retry UI. A repeated Configure write while configuration is active is rejected and never starts a second `nmcli` operation.
-8. Disconnect BLE on either terminal state.
-9. On success, discover/use the Pi IP and call `/network/status` or `/health` over WiFi.
-10. Use HTTP/WebSocket/MJPG, not BLE, for measurement data.
+The app must subscribe to both Status and Network Info Notify before writing. On `WIFI_CONNECTED`, wait for Network Info (or Read `0006` if Notify was missed), then call `/health`. Do not disconnect BLE merely because Status is connected. On `FAILED`, the server does not send Network Info, so a stale address is never presented as the result of a failed attempt. A repeated Configure write while active is rejected and never starts a second `nmcli` operation.
+
+Network Info is compact UTF-8 JSON and never contains credentials:
+
+```json
+{"ip":"10.10.141.34","host":"raspi5-009.local","port":8000,"interface":"wlan0"}
+```
+
+Before Wi-Fi, or when DHCP has not assigned an address within the bounded retry, `ip` is `null`; `host`, `port`, and `interface` remain readable. Address selection order is: current BLE `ip`, current BLE `host`, a previously saved address, then another Network Info Read or reprovisioning. Prefer the current `ip` whenever present.
 
 ## Dart service sketch
 
@@ -97,11 +105,14 @@ class VisionPoseBleService {
   static final configureUuid = Guid('9f4c0002-7d9a-4b57-9d9f-000000000002');
   static final statusUuid = Guid('9f4c0003-7d9a-4b57-9d9f-000000000003');
   static final helloUuid = Guid('9f4c0004-7d9a-4b57-9d9f-000000000004');
+  static final networkInfoUuid = Guid('9f4c0006-7d9a-4b57-9d9f-000000000006');
 
   BluetoothDevice? _device;
   BluetoothCharacteristic? _configure;
   BluetoothCharacteristic? _status;
+  BluetoothCharacteristic? _networkInfo;
   StreamSubscription<List<int>>? _statusSubscription;
+  StreamSubscription<List<int>>? _networkInfoSubscription;
 
   Future<Map<String, dynamic>> connectAndVerify(BluetoothDevice device) async {
     await device.connect(timeout: const Duration(seconds: 12));
@@ -112,12 +123,21 @@ class VisionPoseBleService {
         service.characteristics.firstWhere((c) => c.uuid == id);
     _configure = find(configureUuid);
     _status = find(statusUuid);
+    _networkInfo = find(networkInfoUuid);
     final hello = jsonDecode(utf8.decode(await find(helloUuid).read())) as Map<String, dynamic>;
     if (hello['device_name'] != 'VisionPoseCoach-Pi') {
       await disconnect();
       throw StateError('Unexpected BLE device');
     }
     await _status!.setNotifyValue(true);
+    await _networkInfo!.setNotifyValue(true);
+    _networkInfoSubscription = _networkInfo!.onValueReceived.listen((bytes) {
+      final data = jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
+      final ip = data['ip'] as String?;
+      final host = data['host'] as String?;
+      final port = data['port'] as int? ?? 8000;
+      // Prefer ip, fall back to host, and verify http://address:port/health.
+    });
     return hello;
   }
 
@@ -140,7 +160,9 @@ class VisionPoseBleService {
 
   Future<void> disconnect() async {
     await _statusSubscription?.cancel();
+    await _networkInfoSubscription?.cancel();
     _statusSubscription = null;
+    _networkInfoSubscription = null;
     final device = _device;
     _device = null;
     if (device != null) await device.disconnect();
