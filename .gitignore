@@ -1,0 +1,9 @@
+# Python 가상환경 폴더
+.venv/
+venv/
+ENV/
+
+# 파이썬 캐시 파일
+__pycache__/
+*.py[cod]
+*$py.class
