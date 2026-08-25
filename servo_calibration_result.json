@@ -1,0 +1,59 @@
+{
+    "saved_at": "2026-08-25T12:44:08.599194",
+    "device": "/dev/ttyACM0",
+    "baudrate": 1000000,
+    "servos": {
+        "1": {
+            "servo_id": 1,
+            "joint": "shoulder_lift",
+            "direction": 1,
+            "zero_position": 1708,
+            "urdf_min_angle_rad": -1.74533,
+            "urdf_max_angle_rad": 1.74533,
+            "position_at_urdf_min_angle": 570,
+            "position_at_urdf_max_angle": 2846,
+            "safe_position_at_min_angle": 574,
+            "safe_position_at_max_angle": 2710,
+            "max_speed": null
+        },
+        "2": {
+            "servo_id": 2,
+            "joint": "elbow_flex",
+            "direction": 1,
+            "zero_position": 2010,
+            "urdf_min_angle_rad": -1.69,
+            "urdf_max_angle_rad": 1.69,
+            "position_at_urdf_min_angle": 908,
+            "position_at_urdf_max_angle": 3112,
+            "safe_position_at_min_angle": 996,
+            "safe_position_at_max_angle": 3026,
+            "max_speed": null
+        },
+        "3": {
+            "servo_id": 3,
+            "joint": "wrist_flex",
+            "direction": 1,
+            "zero_position": null,
+            "urdf_min_angle_rad": -1.65806,
+            "urdf_max_angle_rad": 1.65806,
+            "position_at_urdf_min_angle": null,
+            "position_at_urdf_max_angle": null,
+            "safe_position_at_min_angle": null,
+            "safe_position_at_max_angle": null,
+            "max_speed": null
+        },
+        "4": {
+            "servo_id": 4,
+            "joint": "wrist_roll",
+            "direction": -1,
+            "zero_position": null,
+            "urdf_min_angle_rad": -2.74385,
+            "urdf_max_angle_rad": 2.84121,
+            "position_at_urdf_min_angle": null,
+            "position_at_urdf_max_angle": null,
+            "safe_position_at_min_angle": null,
+            "safe_position_at_max_angle": null,
+            "max_speed": null
+        }
+    }
+}
