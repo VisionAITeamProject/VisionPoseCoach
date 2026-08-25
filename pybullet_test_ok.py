@@ -30,7 +30,7 @@ def main():
         basePosition=user_pos
     )
 
-    urdf_path = "/home/bhc/poco/SO-ARM100-main/Simulation/SO101/so101_new_calib.urdf"
+    urdf_path = "/home/rungmin/VIsion/VisionPoseCoach/SO-ARM100-main/Simulation/SO101/so101_monitor_attached.urdf"
     if not os.path.exists(urdf_path):
         print(f"경고: {urdf_path} 경로에 URDF 파일이 없습니다.")
     
