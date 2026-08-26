@@ -1,66 +1,41 @@
 """
 motor_control/controller.py
 
-[역할]
-다른 팀원들이 실제 제어 로직에서 사용하는 상위 Motor API.
+[파이프라인에서의 역할]
+다른 팀원이 실제 AI/센서/조건 로직에서 사용하는 상위 Motor API이다.
 
-팀원이 기본적으로 알아야 하는 값:
+팀원이 기본적으로 지정하는 값:
+- joint_name
+- angle 또는 delta_angle
+- speed
 
-1. Joint 이름
-2. Angle
-3. Speed
+선택 인자:
+- acc (기본 10)
+- wait (기본 True)
+- timeout
 
-선택적으로 사용할 수 있는 값:
+[팀원용 방향]
+- shoulder_lift : + = 위,  - = 아래
+- elbow_flex    : + = 위,  - = 아래
+- wrist_flex    : + = 위,  - = 아래
+- wrist_roll    : + = CCW, - = CW
 
-4. Acc
-5. wait
+[Emergency Stop]
 
-------------------------------------------------------------
-[최종 팀원용 방향]
+emergency_stop()이 호출되면:
 
-shoulder_lift
-    + = 위
-    - = 아래
+1. 소프트웨어 Emergency latch를 즉시 ON한다.
+2. 모든 Servo Torque를 Sync Write로 OFF한다.
+3. 이후 모든 이동 API를 차단한다.
 
-elbow_flex
-    + = 위
-    - = 아래
-
-wrist_flex
-    + = 위
-    - = 아래
-
-wrist_roll
-    + = CCW
-    - = CW
-
-------------------------------------------------------------
-[절대각도]
-
-move_joint()
-
-Zero Position을 0°로 보고
-최종 목표 각도를 지정한다.
-
-------------------------------------------------------------
-[상대각도]
-
-move_joint_relative()
-
-현재 실제 위치를 기준으로
-추가 이동할 각도를 지정한다.
-
-------------------------------------------------------------
-[여러 관절]
-
-move_joints()
-
-여러 Servo의 명령값을 모두 먼저 검사한 뒤
-SyncWrite를 통해 가능한 한 동시에 시작한다.
+중요:
+이 E-Stop은 '소프트웨어 Torque OFF' 기능이다.
+전원 자체를 물리적으로 끊는
+하드웨어 비상정지와 동일하지 않다.
 """
 
+import threading
 import time
-
 
 from .config import (
     DEFAULT_ACC,
@@ -70,21 +45,15 @@ from .config import (
     POLL_INTERVAL_SEC,
 )
 
-
 from .calibration import (
     CalibrationManager,
     CalibrationError,
 )
 
-
 from .servo_driver import (
     ServoDriver,
 )
 
-
-# ============================================================
-# 1. Motor Controller
-# ============================================================
 
 class MotorController:
 
@@ -94,7 +63,7 @@ class MotorController:
     ):
 
         # ----------------------------------------------------
-        # Calibration Manager
+        # Calibration Load
         # ----------------------------------------------------
 
         if calibration_file is None:
@@ -102,7 +71,6 @@ class MotorController:
             self.calibration = (
                 CalibrationManager()
             )
-
 
         else:
 
@@ -114,11 +82,8 @@ class MotorController:
 
 
         # ----------------------------------------------------
-        # Servo Driver
+        # STServo Driver
         # ----------------------------------------------------
-        #
-        # Serial device / baudrate는
-        # Calibration JSON 값을 사용한다.
 
         self.driver = (
             ServoDriver(
@@ -132,8 +97,38 @@ class MotorController:
         )
 
 
+        # ----------------------------------------------------
+        # Emergency Stop latch
+        # ----------------------------------------------------
+        #
+        # threading.Event를 사용해
+        # 다른 Thread에서 E-Stop을 호출해도
+        # 모든 이동 함수가 같은 상태를 확인할 수 있다.
+
+        self._emergency_event = (
+            threading.Event()
+        )
+
+
+        # ----------------------------------------------------
+        # 이동 명령 / E-Stop 경합 방지 Lock
+        # ----------------------------------------------------
+        #
+        # Position 명령 송신 중 E-Stop이 들어오거나,
+        # E-Stop 직후 새로운 Position 명령이
+        # 들어가는 상황을 방지한다.
+        #
+        # wait=True의 목표 도착 대기 중에는
+        # 이 Lock을 잡고 있지 않으므로
+        # 다른 Thread에서 E-Stop 호출이 가능하다.
+
+        self._command_lock = (
+            threading.RLock()
+        )
+
+
     # ========================================================
-    # 2. Error 출력
+    # Error 출력
     # ========================================================
 
     @staticmethod
@@ -147,28 +142,142 @@ class MotorController:
 
 
     # ========================================================
-    # 3. Zero 기준 절대각도 제어
+    # Emergency 상태 확인
+    # ========================================================
+
+    def _check_emergency_state(
+        self
+    ):
+
+        if (
+            self._emergency_event.is_set()
+        ):
+
+            self._print_error(
+                "Emergency Stop 상태입니다. "
+                "모든 모터 이동 명령이 "
+                "차단되어 있습니다."
+            )
+
+            return False
+
+
+        return True
+
+
+    # ========================================================
+    # Emergency 상태 조회
+    # ========================================================
+
+    def is_emergency_stopped(
+        self
+    ):
+
+        return (
+            self._emergency_event.is_set()
+        )
+
+
+    # ========================================================
+    # Emergency Stop
+    # ========================================================
+    #
+    # 모터/로봇팔이 끼였을 때
+    # 목표 위치로 계속 힘을 주는 것을 차단한다.
+    #
+    # 현재 위치 Hold가 아니라
+    # Servo Torque 자체를 OFF한다.
+    #
+    # 중요:
+    # Emergency latch를 Torque OFF 전부터 ON하여
+    # 이후 새로운 이동 명령을 먼저 막는다.
+
+    def emergency_stop(
+        self
+    ):
+
+        # ----------------------------------------------------
+        # 1. 소프트웨어적으로 먼저 모든 이동 차단
+        # ----------------------------------------------------
+
+        self._emergency_event.set()
+
+
+        servo_ids = sorted(
+            self.calibration.servos_by_id.keys()
+        )
+
+
+        # ----------------------------------------------------
+        # 2. 모든 Servo Torque OFF
+        # ----------------------------------------------------
+
+        try:
+
+            with self._command_lock:
+
+                success = (
+                    self.driver.disable_torque_all_sync(
+                        servo_ids
+                    )
+                )
+
+
+        except Exception as error:
+
+            # 통신 오류가 나더라도
+            # Emergency latch는 절대 자동 해제하지 않는다.
+
+            self._print_error(
+                "Emergency Stop Torque OFF "
+                f"전송 중 오류: {error}"
+            )
+
+            return False
+
+
+        if not success:
+
+            self._print_error(
+                "Emergency Stop Torque OFF "
+                "패킷 전송에 실패했습니다. "
+                "Emergency 상태는 계속 유지됩니다."
+            )
+
+            return False
+
+
+        print(
+            "[EMERGENCY STOP] "
+            "모든 Servo에 Torque OFF 명령을 "
+            "전송했습니다. "
+            "이후 이동 명령은 차단됩니다."
+        )
+
+
+        return True
+
+
+    # ========================================================
+    # 1. Zero 기준 절대각도 제어
     # ========================================================
     #
     # 예:
     #
-    # arm.move_joint(
+    # move_joint(
     #     "shoulder_lift",
-    #     angle=30,
-    #     speed=100
+    #     30,
+    #     100
     # )
     #
-    # 현재 위치와 관계없이
-    # Zero 기준 팀원용 +30° 위치로 이동.
+    # -> 현재 위치와 관계없이
+    #    Zero 기준 +30° 위치
     #
     #
     # wrist_roll:
     #
-    # angle=+30
-    # -> CCW
-    #
-    # angle=-30
-    # -> CW
+    # +30° = CCW
+    # -30° = CW
 
     def move_joint(
         self,
@@ -180,26 +289,27 @@ class MotorController:
         timeout=DEFAULT_TIMEOUT_SEC
     ):
 
+        # ----------------------------------------------------
+        # Emergency Stop이면 처음부터 차단
+        # ----------------------------------------------------
+
+        if not self._check_emergency_state():
+
+            return False
+
+
         try:
 
-            # ------------------------------------------------
-            # Speed 검사
-            # ------------------------------------------------
-
+            # Speed
             speed = (
                 self.calibration.validate_speed(
-
                     joint_name,
-
                     speed
                 )
             )
 
 
-            # ------------------------------------------------
-            # Acc 검사
-            # ------------------------------------------------
-
+            # Acc
             acc = (
                 self.calibration.validate_acc(
                     acc
@@ -207,12 +317,8 @@ class MotorController:
             )
 
 
-            # ------------------------------------------------
-            # 팀원용 각도 -> STS Position
-            #
-            # 이 과정에서 Safe Range도 검사한다.
-            # ------------------------------------------------
-
+            # 팀원 각도 -> raw Position
+            # Safe Range 검사 포함
             target_position = (
                 self.calibration.command_angle_to_position(
 
@@ -222,10 +328,6 @@ class MotorController:
                 )
             )
 
-
-            # ------------------------------------------------
-            # Servo ID
-            # ------------------------------------------------
 
             servo = (
                 self.calibration.get_joint(
@@ -251,31 +353,42 @@ class MotorController:
 
 
         # ----------------------------------------------------
-        # 실제 Servo 이동
+        # 실제 송신 직전 E-Stop 재검사
         # ----------------------------------------------------
+        #
+        # 검증하는 동안 E-Stop이 들어왔을 가능성이 있으므로
+        # command lock 안에서 다시 검사한다.
 
-        success = (
-            self.driver.write_position(
+        with self._command_lock:
 
-                servo_id=
-                    servo_id,
+            if not self._check_emergency_state():
 
-                position=
-                    target_position,
+                return False
 
-                speed=
-                    speed,
 
-                acc=
-                    acc
+            success = (
+                self.driver.write_position(
+
+                    servo_id=
+                        servo_id,
+
+                    position=
+                        target_position,
+
+                    speed=
+                        speed,
+
+                    acc=
+                        acc
+                )
             )
-        )
 
 
         if not success:
 
             self._print_error(
-                f"{joint_name} 이동 명령 실패"
+                f"{joint_name} "
+                "이동 명령 실패"
             )
 
             return False
@@ -283,13 +396,13 @@ class MotorController:
 
         # ----------------------------------------------------
         # wait=False
-        #
-        # 명령만 전송하고 즉시 반환한다.
-        #
-        # 모터가 이동 중이어도
-        # 다른 함수 호출 또는 같은 Servo에
-        # 새로운 목표 명령을 보낼 수 있다.
         # ----------------------------------------------------
+        #
+        # 목표 위치 도착을 기다리지 않고
+        # 즉시 True 반환.
+        #
+        # Servo는 계속 이동하고 있으며
+        # 다른 함수를 바로 호출할 수 있다.
 
         if not wait:
 
@@ -298,8 +411,6 @@ class MotorController:
 
         # ----------------------------------------------------
         # wait=True
-        #
-        # 목표 위치 도착 후 반환
         # ----------------------------------------------------
 
         return self._wait_for_targets(
@@ -315,28 +426,8 @@ class MotorController:
 
 
     # ========================================================
-    # 4. 현재 위치 기준 상대각도 제어
+    # 2. 현재 기준 상대각도 제어
     # ========================================================
-    #
-    # 현재 실제 Position을 읽은 뒤
-    # 팀원용 각도로 변환하고
-    # delta_angle을 더한다.
-    #
-    #
-    # 예:
-    #
-    # 현재 shoulder_lift = +20°
-    #
-    # delta_angle = +10°
-    #
-    # -> 최종 +30°
-    #
-    #
-    # wrist_roll:
-    #
-    # delta_angle = +10°
-    #
-    # -> 현재 위치에서 CCW로 10° 추가 이동.
 
     def move_joint_relative(
         self,
@@ -348,11 +439,12 @@ class MotorController:
         timeout=DEFAULT_TIMEOUT_SEC
     ):
 
-        try:
+        if not self._check_emergency_state():
 
-            # ------------------------------------------------
-            # Calibration 확인
-            # ------------------------------------------------
+            return False
+
+
+        try:
 
             servo = (
                 self.calibration.require_position_calibrated(
@@ -368,10 +460,7 @@ class MotorController:
             )
 
 
-            # ------------------------------------------------
-            # 현재 Position 읽기
-            # ------------------------------------------------
-
+            # 현재 raw Position 읽기
             current_position = (
                 self.driver.read_position(
                     servo_id
@@ -389,11 +478,7 @@ class MotorController:
                 return False
 
 
-            # ------------------------------------------------
-            # 현재 raw Position
-            # -> 현재 팀원용 각도
-            # ------------------------------------------------
-
+            # 현재 Position -> 팀원 기준 현재 각도
             current_angle = (
                 self.calibration.position_to_command_angle(
 
@@ -404,10 +489,7 @@ class MotorController:
             )
 
 
-            # ------------------------------------------------
-            # 상대각도 적용
-            # ------------------------------------------------
-
+            # 현재 위치 + 상대 이동량
             target_angle = (
                 current_angle
                 + float(
@@ -430,11 +512,17 @@ class MotorController:
 
 
         # ----------------------------------------------------
-        # 최종 목표각을 절대각도 함수에 전달
-        #
-        # 따라서 Speed / Safe Range / Acc 검사는
-        # move_joint에서 동일하게 적용된다.
+        # 최종 계산된 목표를 move_joint에 전달
         # ----------------------------------------------------
+        #
+        # 따라서:
+        #
+        # - Emergency 재검사
+        # - Speed
+        # - Acc
+        # - Safe Range
+        #
+        # 모두 동일하게 적용된다.
 
         return self.move_joint(
 
@@ -459,39 +547,16 @@ class MotorController:
 
 
     # ========================================================
-    # 5. 여러 Joint 동시 제어
+    # 3. 여러 Joint 동시 제어
     # ========================================================
     #
-    # 예:
+    # 모든 Joint의 Calibration / Angle / Speed를
+    # 먼저 검사한 뒤
     #
-    # arm.move_joints(
+    # 전부 정상일 때만 Sync Write를 실행한다.
     #
-    #     {
-    #         "shoulder_lift": 30,
-    #         "elbow_flex": 20,
-    #         "wrist_flex": -10,
-    #         "wrist_roll": 15,
-    #     },
-    #
-    #     speed=100
-    # )
-    #
-    #
-    # 중요:
-    #
-    # 모든 Joint의
-    #
-    # - Calibration
-    # - Speed
-    # - Angle
-    # - Safe Range
-    #
-    # 를 먼저 검사한다.
-    #
-    # 하나라도 문제가 있으면
-    # 아무 Servo에도 명령을 보내지 않는다.
-    #
-    # 전부 정상일 때만 SyncWrite 실행.
+    # 하나라도 실패하면
+    # 아무 모터에도 명령을 보내지 않는다.
 
     def move_joints(
         self,
@@ -501,6 +566,11 @@ class MotorController:
         wait=DEFAULT_WAIT,
         timeout=DEFAULT_TIMEOUT_SEC
     ):
+
+        if not self._check_emergency_state():
+
+            return False
+
 
         if not isinstance(
             targets,
@@ -530,10 +600,6 @@ class MotorController:
 
         try:
 
-            # ------------------------------------------------
-            # 공통 Acc 검사
-            # ------------------------------------------------
-
             acc = (
                 self.calibration.validate_acc(
                     acc
@@ -542,7 +608,7 @@ class MotorController:
 
 
             # ------------------------------------------------
-            # 모든 Joint 검증
+            # 모든 Joint를 실제 전송 전에 먼저 검증
             # ------------------------------------------------
 
             for (
@@ -550,7 +616,6 @@ class MotorController:
                 angle
             ) in targets.items():
 
-                # Speed
                 joint_speed = (
                     self.calibration.validate_speed(
 
@@ -561,9 +626,6 @@ class MotorController:
                 )
 
 
-                # Angle -> Position
-                #
-                # Safe Range 검사 포함
                 target_position = (
                     self.calibration.command_angle_to_position(
 
@@ -588,7 +650,6 @@ class MotorController:
                 )
 
 
-                # SyncWrite에 전달할 명령
                 sync_commands[
                     servo_id
                 ] = {
@@ -604,18 +665,12 @@ class MotorController:
                 }
 
 
-                # wait=True일 때 확인할 목표
                 wait_targets[
                     servo_id
                 ] = target_position
 
 
         except CalibrationError as error:
-
-            # ------------------------------------------------
-            # 이 시점까지는 실제 모터 명령을
-            # 하나도 전송하지 않았다.
-            # ------------------------------------------------
 
             self._print_error(
                 error
@@ -625,16 +680,22 @@ class MotorController:
 
 
         # ----------------------------------------------------
-        # 모든 Joint 검증 완료
-        #
-        # 한 패킷으로 SyncWrite
+        # 실제 Sync Write 직전
+        # E-Stop 상태 재확인
         # ----------------------------------------------------
 
-        success = (
-            self.driver.sync_write_positions(
-                sync_commands
+        with self._command_lock:
+
+            if not self._check_emergency_state():
+
+                return False
+
+
+            success = (
+                self.driver.sync_write_positions(
+                    sync_commands
+                )
             )
-        )
 
 
         if not success:
@@ -661,7 +722,7 @@ class MotorController:
 
 
     # ========================================================
-    # 6. 단일 Joint Zero 복귀
+    # 4. 단일 Joint Zero 이동
     # ========================================================
 
     def move_to_zero(
@@ -696,13 +757,8 @@ class MotorController:
 
 
     # ========================================================
-    # 7. 전체 Joint Zero 복귀
+    # 5. 전체 Joint Zero 이동
     # ========================================================
-    #
-    # 모든 Joint를 SyncWrite로 동시에 Zero로 이동.
-    #
-    # 하나라도 Calibration 또는 max_speed가 미완료이면
-    # move_joints 단계에서 전체 명령을 차단한다.
 
     def move_all_to_zero(
         self,
@@ -711,6 +767,11 @@ class MotorController:
         wait=DEFAULT_WAIT,
         timeout=DEFAULT_TIMEOUT_SEC
     ):
+
+        if not self._check_emergency_state():
+
+            return False
+
 
         targets = {
 
@@ -742,20 +803,13 @@ class MotorController:
 
 
     # ========================================================
-    # 8. 현재 Joint Angle
+    # 6. 현재 Joint Angle
     # ========================================================
     #
-    # 반환값도 팀원용 방향 기준.
+    # 상태 읽기는 Emergency Stop 상태에서도 허용한다.
     #
-    # shoulder / elbow / wrist_flex
-    #
-    # + = 위
-    #
-    #
-    # wrist_roll
-    #
-    # + = CCW
-    # - = CW
+    # 비상정지 이후에도
+    # 실제 Position이나 상태를 확인할 수 있어야 한다.
 
     def get_joint_angle(
         self,
@@ -815,7 +869,7 @@ class MotorController:
 
 
     # ========================================================
-    # 9. 단일 Joint 상태
+    # 7. 단일 Joint 상태
     # ========================================================
 
     def get_joint_state(
@@ -856,7 +910,6 @@ class MotorController:
                 return None
 
 
-            # raw Position -> 팀원용 Angle
             angle = (
                 self.calibration.position_to_command_angle(
 
@@ -934,34 +987,27 @@ class MotorController:
 
 
     # ========================================================
-    # 10. 전체 Joint 상태
+    # 8. 전체 Joint 상태
     # ========================================================
 
     def get_all_states(
         self
     ):
 
-        states = {}
+        return {
 
-
-        for joint_name in (
-            self.calibration.servos_by_joint.keys()
-        ):
-
-            states[
-                joint_name
-            ] = (
+            joint_name:
                 self.get_joint_state(
                     joint_name
                 )
-            )
 
-
-        return states
+            for joint_name
+            in self.calibration.servos_by_joint.keys()
+        }
 
 
     # ========================================================
-    # 11. Moving 여부
+    # 9. Moving 여부
     # ========================================================
 
     def is_moving(
@@ -987,8 +1033,14 @@ class MotorController:
 
 
     # ========================================================
-    # 12. 목표 위치 도착 대기
+    # 10. 목표 위치 도착 대기
     # ========================================================
+    #
+    # wait=True일 때 사용.
+    #
+    # 다른 Thread에서 emergency_stop()이 호출되면
+    # Event가 즉시 Set되므로
+    # 목표 도착 대기도 중단된다.
 
     def _wait_for_targets(
         self,
@@ -997,17 +1049,33 @@ class MotorController:
     ):
 
         start_time = (
-            time.time()
+            time.monotonic()
         )
 
 
         while (
-            time.time()
+            time.monotonic()
             - start_time
             < float(
                 timeout
             )
         ):
+
+            # ------------------------------------------------
+            # E-Stop 발생 여부
+            # ------------------------------------------------
+
+            if (
+                self._emergency_event.is_set()
+            ):
+
+                self._print_error(
+                    "Emergency Stop이 발생하여 "
+                    "목표 도착 대기를 중단합니다."
+                )
+
+                return False
+
 
             all_arrived = True
 
@@ -1083,28 +1151,27 @@ class MotorController:
 
 
     # ========================================================
-    # 13. Port 종료
+    # 11. Port 종료
     # ========================================================
 
     def close(
         self
     ):
 
+        """
+        Serial Port를 닫는다.
+
+        주의:
+        close()는 Emergency Stop이 아니다.
+        Torque를 자동으로 OFF하지 않는다.
+        """
+
         self.driver.close()
 
 
     # ========================================================
-    # 14. with 문 지원
+    # 12. with 문 지원
     # ========================================================
-    #
-    # 사용 예:
-    #
-    # with MotorController() as arm:
-    #
-    #     arm.move_joint(...)
-    #
-    #
-    # with 블록 종료 시 자동 close().
 
     def __enter__(
         self

@@ -1,38 +1,38 @@
 """
 motor_control/servo_driver.py
 
-[역할]
-STServo Python SDK와 직접 통신하는 저수준 Driver.
+[파이프라인에서의 역할]
+STServo Python SDK와 직접 통신하는 저수준 Driver이다.
 
-다른 팀원은 이 파일을 직접 사용할 필요가 없다.
+입력:
+- Servo ID
+- raw Position
+- Speed
+- Acc
+- Torque ON/OFF 값
 
-------------------------------------------------------------
-[담당 기능]
+출력:
+- 통신 성공/실패
+- Position / Speed / Load / Voltage / Temperature / Current / Moving
 
-- Serial Port Open / Close
-- Ping
-- 단일 Servo Position 제어
-- 여러 Servo SyncWrite
-- Position 읽기
-- Speed 읽기
-- Load / Voltage / Temperature / Current / Moving 읽기
+이 파일에서는 Joint 이름, Zero, 각도 방향, Safe Range를 판단하지 않는다.
+그 책임은 calibration.py와 controller.py에 있다.
 
-------------------------------------------------------------
-[담당하지 않는 기능]
-
-- Joint 방향 판단
-- Zero 계산
-- 각도 -> Position 계산
-- Safe Range 판단
-
-이 기능들은 calibration.py / controller.py가 담당한다.
+Emergency Stop:
+- Torque Enable 주소에 0을 Sync Write하여
+  여러 Servo Torque를 한 패킷으로 OFF한다.
+- 이는 현재 위치 Hold가 아니라
+  Servo가 힘을 주지 않도록 Torque를 해제하는 동작이다.
 """
 
 import sys
-
+import threading
 
 from .config import (
     SDK_PATH,
+    ADDR_TORQUE_ENABLE,
+    TORQUE_OFF,
+    TORQUE_ON,
 )
 
 
@@ -47,17 +47,14 @@ if SDK_PATH not in sys.path:
     )
 
 
-# ============================================================
-# 2. STServo SDK
-# ============================================================
-
+# 기존 프로젝트에서 사용 중인 SDK import 방식 유지
 from port_handler import PortHandler
 from sms_sts import sms_sts
 from scservo_def import COMM_SUCCESS
 
 
 # ============================================================
-# 3. STS 상태 레지스터
+# 2. STS 상태 레지스터
 # ============================================================
 
 ADDR_PRESENT_LOAD = 60
@@ -68,7 +65,7 @@ ADDR_PRESENT_CURRENT = 69
 
 
 # ============================================================
-# 4. Servo Driver
+# 3. Servo Driver
 # ============================================================
 
 class ServoDriver:
@@ -100,6 +97,24 @@ class ServoDriver:
         )
 
 
+        # ----------------------------------------------------
+        # Serial 통신 Lock
+        # ----------------------------------------------------
+        #
+        # 여러 Thread에서
+        #
+        # - 모터 제어
+        # - 상태 읽기
+        # - Emergency Stop
+        #
+        # 을 동시에 호출해도
+        # Serial 패킷이 서로 섞이지 않게 한다.
+
+        self._io_lock = (
+            threading.RLock()
+        )
+
+
         self.is_open = False
 
 
@@ -107,58 +122,66 @@ class ServoDriver:
 
 
     # ========================================================
-    # 5. Port Open
+    # 4. Port Open
     # ========================================================
 
-    def open(self):
+    def open(
+        self
+    ):
 
-        if self.is_open:
+        with self._io_lock:
+
+            if self.is_open:
+
+                return True
+
+
+            if not self.port_handler.openPort():
+
+                raise RuntimeError(
+                    "Servo Port Open 실패: "
+                    f"{self.device}"
+                )
+
+
+            if not self.port_handler.setBaudRate(
+                self.baudrate
+            ):
+
+                self.port_handler.closePort()
+
+
+                raise RuntimeError(
+                    "Servo Baudrate 설정 실패: "
+                    f"{self.baudrate}"
+                )
+
+
+            self.is_open = True
+
 
             return True
 
 
-        if not self.port_handler.openPort():
+    # ========================================================
+    # 5. Port Close
+    # ========================================================
 
-            raise RuntimeError(
-                "Servo Port Open 실패: "
-                f"{self.device}"
-            )
+    def close(
+        self
+    ):
 
+        with self._io_lock:
 
-        if not self.port_handler.setBaudRate(
-            self.baudrate
-        ):
+            if self.is_open:
 
-            self.port_handler.closePort()
+                self.port_handler.closePort()
 
-
-            raise RuntimeError(
-                "Servo Baudrate 설정 실패: "
-                f"{self.baudrate}"
-            )
-
-
-        self.is_open = True
-
-
-        return True
+                self.is_open = False
 
 
     # ========================================================
-    # 6. Port Close
-    # ========================================================
-
-    def close(self):
-
-        if self.is_open:
-
-            self.port_handler.closePort()
-
-            self.is_open = False
-
-
-    # ========================================================
-    # 7. Ping
+    # 6. Ping
     # ========================================================
 
     def ping(
@@ -166,13 +189,19 @@ class ServoDriver:
         servo_id
     ):
 
-        model_number, result, error = (
-            self.packet_handler.ping(
-                int(
-                    servo_id
+        with self._io_lock:
+
+            (
+                model_number,
+                result,
+                error
+            ) = (
+                self.packet_handler.ping(
+                    int(
+                        servo_id
+                    )
                 )
             )
-        )
 
 
         success = (
@@ -189,9 +218,7 @@ class ServoDriver:
             "model_number":
                 (
                     model_number
-
                     if success
-
                     else None
                 ),
 
@@ -204,7 +231,7 @@ class ServoDriver:
 
 
     # ========================================================
-    # 8. 단일 Servo 이동
+    # 7. 단일 Servo 이동
     # ========================================================
 
     def write_position(
@@ -215,26 +242,28 @@ class ServoDriver:
         acc
     ):
 
-        result, error = (
-            self.packet_handler.WritePosEx(
+        with self._io_lock:
 
-                int(
-                    servo_id
-                ),
+            result, error = (
+                self.packet_handler.WritePosEx(
 
-                int(
-                    position
-                ),
+                    int(
+                        servo_id
+                    ),
 
-                int(
-                    speed
-                ),
+                    int(
+                        position
+                    ),
 
-                int(
-                    acc
+                    int(
+                        speed
+                    ),
+
+                    int(
+                        acc
+                    )
                 )
             )
-        )
 
 
         return (
@@ -244,32 +273,15 @@ class ServoDriver:
 
 
     # ========================================================
-    # 9. 여러 Servo 동기 이동
+    # 8. 여러 Servo 위치 동기 이동
     # ========================================================
     #
-    # commands 예:
+    # SyncWritePosEx()를 이용해
+    # 각 Servo Parameter를 먼저 버퍼에 추가하고
     #
-    # {
+    # groupSyncWrite.txPacket()
     #
-    #     1: {
-    #         "position": 1500,
-    #         "speed": 100,
-    #         "acc": 10
-    #     },
-    #
-    #     2: {
-    #         "position": 2000,
-    #         "speed": 100,
-    #         "acc": 10
-    #     }
-    #
-    # }
-    #
-    #
-    # SyncWritePosEx()로 각 Servo의 값을
-    # GroupSyncWrite에 먼저 추가한다.
-    #
-    # 이후 txPacket() 한 번으로 실제 통신 패킷을 전송한다.
+    # 한 번으로 전송한다.
 
     def sync_write_positions(
         self,
@@ -281,75 +293,185 @@ class ServoDriver:
         )
 
 
-        # 이전에 남아 있을 수 있는 Parameter 제거
-        group_sync_write.clearParam()
-
-
-        try:
-
-            # ------------------------------------------------
-            # 각 Servo Parameter 추가
-            # ------------------------------------------------
-
-            for (
-                servo_id,
-                command
-            ) in commands.items():
-
-                added = (
-                    self.packet_handler.SyncWritePosEx(
-
-                        int(
-                            servo_id
-                        ),
-
-                        int(
-                            command[
-                                "position"
-                            ]
-                        ),
-
-                        int(
-                            command[
-                                "speed"
-                            ]
-                        ),
-
-                        int(
-                            command[
-                                "acc"
-                            ]
-                        )
-                    )
-                )
-
-
-                if not added:
-
-                    return False
-
-
-            # ------------------------------------------------
-            # 실제 동기 패킷 전송
-            # ------------------------------------------------
-
-            result = (
-                group_sync_write.txPacket()
-            )
-
-
-            return (
-                result == COMM_SUCCESS
-            )
-
-
-        finally:
+        with self._io_lock:
 
             group_sync_write.clearParam()
 
 
+            try:
+
+                for (
+                    servo_id,
+                    command
+                ) in commands.items():
+
+                    added = (
+                        self.packet_handler.SyncWritePosEx(
+
+                            int(
+                                servo_id
+                            ),
+
+                            int(
+                                command[
+                                    "position"
+                                ]
+                            ),
+
+                            int(
+                                command[
+                                    "speed"
+                                ]
+                            ),
+
+                            int(
+                                command[
+                                    "acc"
+                                ]
+                            )
+                        )
+                    )
+
+
+                    if not added:
+
+                        return False
+
+
+                result = (
+                    group_sync_write.txPacket()
+                )
+
+
+                return (
+                    result
+                    == COMM_SUCCESS
+                )
+
+
+            finally:
+
+                group_sync_write.clearParam()
+
+
     # ========================================================
-    # 10. Position 읽기
+    # 9. 단일 Servo Torque 설정
+    # ========================================================
+
+    def set_torque(
+        self,
+        servo_id,
+        enabled
+    ):
+
+        value = (
+            TORQUE_ON
+            if enabled
+            else TORQUE_OFF
+        )
+
+
+        with self._io_lock:
+
+            result, error = (
+                self.packet_handler.write1ByteTxRx(
+
+                    int(
+                        servo_id
+                    ),
+
+                    ADDR_TORQUE_ENABLE,
+
+                    value
+                )
+            )
+
+
+        return (
+            result == COMM_SUCCESS
+            and error == 0
+        )
+
+
+    # ========================================================
+    # 10. 전체 Servo Torque 동기 OFF
+    # ========================================================
+    #
+    # Emergency Stop 전용.
+    #
+    # Servo 1 → Servo 2 → Servo 3 → Servo 4
+    # 순서로 하나씩 끄는 것이 아니라
+    #
+    # Sync Write Parameter:
+    #
+    # [ID1, 0, ID2, 0, ID3, 0, ID4, 0]
+    #
+    # 을 만들어 Torque Enable 주소 40에
+    # 한 번의 Sync Write 패킷으로 전송한다.
+    #
+    # 중요:
+    # Sync Write는 각 Servo의 응답을 기다리지 않는다.
+    # 따라서 반환값은 패킷 송신 성공 여부다.
+
+    def disable_torque_all_sync(
+        self,
+        servo_ids
+    ):
+
+        servo_ids = [
+            int(
+                servo_id
+            )
+
+            for servo_id
+            in servo_ids
+        ]
+
+
+        if not servo_ids:
+
+            return False
+
+
+        params = []
+
+
+        for servo_id in servo_ids:
+
+            params.extend(
+                [
+                    servo_id,
+                    TORQUE_OFF,
+                ]
+            )
+
+
+        with self._io_lock:
+
+            result = (
+                self.packet_handler.syncWriteTxOnly(
+
+                    ADDR_TORQUE_ENABLE,
+
+                    1,
+
+                    params,
+
+                    len(
+                        params
+                    )
+                )
+            )
+
+
+        return (
+            result
+            == COMM_SUCCESS
+        )
+
+
+    # ========================================================
+    # 11. Position 읽기
     # ========================================================
 
     def read_position(
@@ -357,13 +479,15 @@ class ServoDriver:
         servo_id
     ):
 
-        position, result, error = (
-            self.packet_handler.ReadPos(
-                int(
-                    servo_id
+        with self._io_lock:
+
+            position, result, error = (
+                self.packet_handler.ReadPos(
+                    int(
+                        servo_id
+                    )
                 )
             )
-        )
 
 
         if (
@@ -380,7 +504,7 @@ class ServoDriver:
 
 
     # ========================================================
-    # 11. Speed 읽기
+    # 12. Speed 읽기
     # ========================================================
 
     def read_speed(
@@ -388,13 +512,15 @@ class ServoDriver:
         servo_id
     ):
 
-        speed, result, error = (
-            self.packet_handler.ReadSpeed(
-                int(
-                    servo_id
+        with self._io_lock:
+
+            speed, result, error = (
+                self.packet_handler.ReadSpeed(
+                    int(
+                        servo_id
+                    )
                 )
             )
-        )
 
 
         if (
@@ -411,7 +537,7 @@ class ServoDriver:
 
 
     # ========================================================
-    # 12. Servo 전체 상태 읽기
+    # 13. Servo 전체 상태 읽기
     # ========================================================
 
     def read_state(
@@ -425,180 +551,214 @@ class ServoDriver:
 
 
         # ----------------------------------------------------
-        # Position
+        # 하나의 Servo 상태를 읽는 동안
+        # 다른 Thread의 패킷이 사이에 끼지 않게 보호
         # ----------------------------------------------------
 
-        position = (
-            self.read_position(
-                servo_id
-            )
-        )
+        with self._io_lock:
 
-
-        if position is None:
-
-            return None
-
-
-        # ----------------------------------------------------
-        # Speed
-        # ----------------------------------------------------
-
-        speed = (
-            self.read_speed(
-                servo_id
-            )
-        )
-
-
-        # ----------------------------------------------------
-        # Load
-        # ----------------------------------------------------
-
-        load_raw, result, error = (
-            self.packet_handler.read2ByteTxRx(
-
-                servo_id,
-
-                ADDR_PRESENT_LOAD
-            )
-        )
-
-
-        if (
-            result == COMM_SUCCESS
-            and error == 0
-        ):
-
-            load_value = (
-                load_raw & 0x03FF
+            # Position
+            (
+                position,
+                result,
+                error
+            ) = (
+                self.packet_handler.ReadPos(
+                    servo_id
+                )
             )
 
 
-            if load_raw & 0x0400:
+            if (
+                result != COMM_SUCCESS
+                or error != 0
+            ):
 
-                load_value = (
-                    -load_value
+                return None
+
+
+            position = int(
+                position
+            )
+
+
+            # Speed
+            (
+                speed,
+                result,
+                error
+            ) = (
+                self.packet_handler.ReadSpeed(
+                    servo_id
+                )
+            )
+
+
+            if (
+                result != COMM_SUCCESS
+                or error != 0
+            ):
+
+                speed = None
+
+            else:
+
+                speed = int(
+                    speed
                 )
 
 
-            load_percent = (
-                abs(
-                    load_value
+            # Load
+            (
+                load_raw,
+                result,
+                error
+            ) = (
+                self.packet_handler.read2ByteTxRx(
+
+                    servo_id,
+
+                    ADDR_PRESENT_LOAD
                 )
-                / 1000.0
-                * 100.0
             )
 
-
-        else:
-
-            load_value = None
-
-            load_percent = None
-
-
-        # ----------------------------------------------------
-        # Voltage
-        # ----------------------------------------------------
-
-        voltage_raw, result, error = (
-            self.packet_handler.read1ByteTxRx(
-
-                servo_id,
-
-                ADDR_PRESENT_VOLTAGE
-            )
-        )
-
-
-        voltage = (
-
-            voltage_raw
-            * 0.1
 
             if (
                 result == COMM_SUCCESS
                 and error == 0
+            ):
+
+                load_value = (
+                    load_raw
+                    & 0x03FF
+                )
+
+
+                if (
+                    load_raw
+                    & 0x0400
+                ):
+
+                    load_value = (
+                        -load_value
+                    )
+
+
+                load_percent = (
+                    abs(
+                        load_value
+                    )
+                    / 1000.0
+                    * 100.0
+                )
+
+
+            else:
+
+                load_value = None
+                load_percent = None
+
+
+            # Voltage
+            (
+                voltage_raw,
+                result,
+                error
+            ) = (
+                self.packet_handler.read1ByteTxRx(
+
+                    servo_id,
+
+                    ADDR_PRESENT_VOLTAGE
+                )
             )
 
-            else None
-        )
 
+            voltage = (
 
-        # ----------------------------------------------------
-        # Temperature
-        # ----------------------------------------------------
+                voltage_raw
+                * 0.1
 
-        temperature, result, error = (
-            self.packet_handler.read1ByteTxRx(
+                if (
+                    result == COMM_SUCCESS
+                    and error == 0
+                )
 
-                servo_id,
-
-                ADDR_PRESENT_TEMPERATURE
+                else None
             )
-        )
 
 
-        if not (
-            result == COMM_SUCCESS
-            and error == 0
-        ):
+            # Temperature
+            (
+                temperature,
+                result,
+                error
+            ) = (
+                self.packet_handler.read1ByteTxRx(
 
-            temperature = None
+                    servo_id,
 
-
-        # ----------------------------------------------------
-        # Current
-        # ----------------------------------------------------
-        #
-        # mA 환산계수는 최종 데이터시트 기준을
-        # 별도로 확정할 예정이므로
-        # 현재 패키지에서는 raw 값 그대로 반환한다.
-
-        current_raw, result, error = (
-            self.packet_handler.read2ByteTxRx(
-
-                servo_id,
-
-                ADDR_PRESENT_CURRENT
+                    ADDR_PRESENT_TEMPERATURE
+                )
             )
-        )
 
 
-        if not (
-            result == COMM_SUCCESS
-            and error == 0
-        ):
+            if (
+                result != COMM_SUCCESS
+                or error != 0
+            ):
 
-            current_raw = None
+                temperature = None
 
 
-        # ----------------------------------------------------
-        # Moving
-        # ----------------------------------------------------
+            # Current
+            #
+            # mA 변환계수는 아직 최종 데이터시트 기준으로
+            # 확정하지 않았으므로 raw 값 그대로 반환.
+            (
+                current_raw,
+                result,
+                error
+            ) = (
+                self.packet_handler.read2ByteTxRx(
 
-        moving, result, error = (
-            self.packet_handler.read1ByteTxRx(
+                    servo_id,
 
-                servo_id,
-
-                ADDR_MOVING
+                    ADDR_PRESENT_CURRENT
+                )
             )
-        )
 
 
-        if not (
-            result == COMM_SUCCESS
-            and error == 0
-        ):
+            if (
+                result != COMM_SUCCESS
+                or error != 0
+            ):
 
-            moving = None
+                current_raw = None
 
 
-        # ----------------------------------------------------
-        # 결과
-        # ----------------------------------------------------
+            # Moving
+            (
+                moving,
+                result,
+                error
+            ) = (
+                self.packet_handler.read1ByteTxRx(
+
+                    servo_id,
+
+                    ADDR_MOVING
+                )
+            )
+
+
+            if (
+                result != COMM_SUCCESS
+                or error != 0
+            ):
+
+                moving = None
+
 
         return {
 

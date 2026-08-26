@@ -1,124 +1,73 @@
 """
 motor_control/calibration.py
 
-[역할]
-servo_calibration_result.json을 읽어서
-팀원이 사용하는 각도와 실제 STS Position 사이의 변환을 담당한다.
+[파이프라인에서의 역할]
+servo_calibration_result.json에 저장된 실제 하드웨어 Calibration 결과를 읽고,
+팀원이 사용하는 각도와 STS raw Position 사이를 변환한다.
 
-이 파일에서는 Calibration JSON을 수정하지 않는다.
-읽기 전용으로만 사용한다.
+입력:
+- Joint 이름
+- 팀원용 각도(deg)
+- Servo Calibration JSON
 
-------------------------------------------------------------
-[주요 기능]
+출력:
+- Servo ID
+- 안전 검증된 raw Position
+- 팀원 기준 현재 각도
 
-1. Joint 이름 -> Servo ID / Calibration 정보 조회
-
-2. 팀원용 각도 -> URDF 각도 변환
-
-3. URDF 각도 -> STS raw Position 변환
-
-4. STS Position -> 팀원용 각도 변환
-
-5. 실제 Safe MIN / MAX 범위 검사
-
-6. Servo별 max_speed 검사
-
-7. 방향 설정 자체 검증
-
-------------------------------------------------------------
-[최종 팀원용 방향]
-
-shoulder_lift
-    + = 위
-    - = 아래
-
-elbow_flex
-    + = 위
-    - = 아래
-
-wrist_flex
-    + = 위
-    - = 아래
-
-wrist_roll
-    + = CCW
-    - = CW
+중요:
+이 파일은 Calibration JSON을 읽기만 하며 수정하거나 저장하지 않는다.
+팀원용 motor_control 패키지에서는 Calibration이 완료되지 않은
+모터의 RAW 제어를 허용하지 않는다.
 """
 
 import json
 import os
 
-
 from .config import (
     CALIBRATION_FILE,
     DEFAULT_DEVICE,
     DEFAULT_BAUDRATE,
-
     STS_POSITION_MIN,
     STS_POSITION_MAX,
-
     POSITION_PER_DEGREE,
     DEGREE_PER_POSITION,
-
     COMMAND_TO_URDF_DIRECTION,
     EXPECTED_RAW_SIGN_FOR_POSITIVE_COMMAND,
-
     MIN_ACC,
     MAX_ACC,
 )
 
 
-# ============================================================
-# 1. Calibration 관련 Error
-# ============================================================
-
 class CalibrationError(Exception):
-    """
-    Calibration 정보 부족,
-    잘못된 각도/속도/가속도,
-    안전범위 초과 등에 사용한다.
-    """
+    """Calibration/안전 검증 과정에서 발생한 오류."""
 
-
-# ============================================================
-# 2. Calibration Manager
-# ============================================================
 
 class CalibrationManager:
+    """Calibration JSON 로드 및 각도/Position 변환 담당."""
 
     def __init__(
         self,
         calibration_file=CALIBRATION_FILE
     ):
 
-        self.calibration_file = (
-            calibration_file
-        )
+        self.calibration_file = calibration_file
 
-        self.device = (
-            DEFAULT_DEVICE
-        )
-
-        self.baudrate = (
-            DEFAULT_BAUDRATE
-        )
+        self.device = DEFAULT_DEVICE
+        self.baudrate = DEFAULT_BAUDRATE
 
         self.servos_by_id = {}
-
         self.servos_by_joint = {}
 
-
-        # Calibration JSON 읽기
         self._load()
 
-
-        # 방향 설정이 잘못되어 있으면
-        # 실제 모터를 움직이기 전에 초기화 단계에서 차단
+        # 실제 모터를 움직이기 전에
+        # 우리가 정한 방향 설정이 맞는지 자체 검증
         self._validate_direction_configuration()
 
 
     # ========================================================
-    # 3. Calibration JSON 읽기
+    # Calibration JSON 읽기
     # ========================================================
 
     def _load(self):
@@ -126,9 +75,8 @@ class CalibrationManager:
         if not os.path.exists(
             self.calibration_file
         ):
-
             raise CalibrationError(
-                "Calibration 파일이 없습니다: "
+                f"Calibration 파일이 없습니다: "
                 f"{self.calibration_file}"
             )
 
@@ -141,28 +89,21 @@ class CalibrationManager:
                 encoding="utf-8"
             ) as file:
 
-                data = json.load(
-                    file
-                )
+                data = json.load(file)
 
 
         except Exception as error:
 
             raise CalibrationError(
-                "Calibration JSON 읽기 실패: "
+                f"Calibration JSON 읽기 실패: "
                 f"{error}"
             ) from error
 
-
-        # ----------------------------------------------------
-        # 통신 정보
-        # ----------------------------------------------------
 
         self.device = data.get(
             "device",
             DEFAULT_DEVICE
         )
-
 
         self.baudrate = int(
             data.get(
@@ -171,10 +112,6 @@ class CalibrationManager:
             )
         )
 
-
-        # ----------------------------------------------------
-        # Servo 정보
-        # ----------------------------------------------------
 
         saved_servos = data.get(
             "servos",
@@ -191,10 +128,7 @@ class CalibrationManager:
 
 
         # ----------------------------------------------------
-        # ID 기준 Dictionary
-        # Joint 이름 기준 Dictionary
-        #
-        # 두 가지 형태로 만들어 놓는다.
+        # ID 기준 / Joint 기준 Dictionary 생성
         # ----------------------------------------------------
 
         for (
@@ -247,37 +181,28 @@ class CalibrationManager:
 
 
     # ========================================================
-    # 4. Direction 설정 검증
+    # 방향 설정 자체 검증
     # ========================================================
     #
-    # 팀원 +각도를 줬을 때 raw Position 변화 방향:
+    # 팀원 +각도에 대한 raw Position 변화 방향:
     #
-    # Calibration direction
+    # calibration_direction
     # ×
-    # COMMAND_TO_URDF_DIRECTION
-    #
-    # 로 결정된다.
+    # command_direction
     #
     #
     # wrist_roll 예:
     #
-    # Calibration direction = -1
+    # calibration direction = -1
+    # command direction     = +1
     #
-    # COMMAND_TO_URDF_DIRECTION = +1
-    #
-    # -1 × +1 = -1
-    #
-    # 즉:
+    # 결과 = -1
     #
     # 팀원 +각도
     # -> raw Position 감소
-    # -> 실제 CCW
+    # -> CCW
     #
-    # 우리가 확정한
-    #
-    # wrist_roll + = CCW
-    #
-    # 와 정확하게 일치한다.
+    # 최종 기준과 일치.
 
     def _validate_direction_configuration(
         self
@@ -325,7 +250,7 @@ class CalibrationManager:
             ):
 
                 raise CalibrationError(
-                    f"{joint} direction 값 오류: "
+                    f"{joint} calibration direction 값 오류: "
                     f"{calibration_direction}"
                 )
 
@@ -361,7 +286,7 @@ class CalibrationManager:
 
 
     # ========================================================
-    # 5. Joint 이름으로 Servo 정보 조회
+    # Joint 조회
     # ========================================================
 
     def get_joint(
@@ -394,16 +319,8 @@ class CalibrationManager:
 
 
     # ========================================================
-    # 6. Position Calibration 완료 여부 확인
+    # Calibration 완료 여부
     # ========================================================
-    #
-    # 팀원용 motor_control 패키지에서는 RAW MODE를 허용하지 않는다.
-    #
-    # 반드시 아래 값이 있어야 한다.
-    #
-    # zero_position
-    # safe_position_at_min_angle
-    # safe_position_at_max_angle
 
     def require_position_calibrated(
         self,
@@ -423,7 +340,6 @@ class CalibrationManager:
 
 
         missing = [
-
             key
 
             for key in required
@@ -448,14 +364,8 @@ class CalibrationManager:
 
 
     # ========================================================
-    # 7. Speed 검사
+    # Speed 검사
     # ========================================================
-    #
-    # 각 Servo의 max_speed는
-    # servo_calibration_result.json에 저장한다.
-    #
-    # 아직 max_speed=null이면
-    # 안전 속도 기준이 정해지지 않은 상태이므로 차단한다.
 
     def validate_speed(
         self,
@@ -526,12 +436,8 @@ class CalibrationManager:
 
 
     # ========================================================
-    # 8. Acc 검사
+    # Acc 검사
     # ========================================================
-    #
-    # acc는 선택 인자.
-    #
-    # controller.py에서 생략하면 기본값 10이 들어온다.
 
     @staticmethod
     def validate_acc(
@@ -571,42 +477,8 @@ class CalibrationManager:
 
 
     # ========================================================
-    # 9. 팀원용 각도 -> STS Position
+    # 팀원용 각도 -> raw Position
     # ========================================================
-    #
-    # Zero 기준 절대각도를 raw Position으로 변환한다.
-    #
-    #
-    # shoulder_lift +30° 예:
-    #
-    # 팀원:
-    # +30° = 위
-    #
-    # command direction = -1
-    #
-    # +30 team
-    # -> -30 URDF
-    #
-    # calibration direction = +1
-    #
-    # raw Position 감소
-    # -> 실제 위
-    #
-    #
-    # wrist_roll +30° 예:
-    #
-    # 팀원:
-    # +30° = CCW
-    #
-    # command direction = +1
-    #
-    # +30 team
-    # -> +30 URDF
-    #
-    # calibration direction = -1
-    #
-    # raw Position 감소
-    # -> 실제 CCW
 
     def command_angle_to_position(
         self,
@@ -683,7 +555,7 @@ class CalibrationManager:
         )
 
 
-        # 실제 안전범위 검사
+        # 실제 Safe Range 검사
         self.validate_target_position(
             joint_name,
             target_position
@@ -694,7 +566,7 @@ class CalibrationManager:
 
 
     # ========================================================
-    # 10. STS Position -> 팀원용 각도
+    # raw Position -> 팀원용 각도
     # ========================================================
 
     def position_to_command_angle(
@@ -763,7 +635,7 @@ class CalibrationManager:
 
 
     # ========================================================
-    # 11. 실제 Safe Position 범위
+    # Safe Position 범위
     # ========================================================
 
     def get_safe_position_range(
@@ -793,8 +665,7 @@ class CalibrationManager:
 
 
         # direction=-1인 Joint도 있으므로
-        # raw Position 숫자 기준으로 다시 정렬한다.
-
+        # raw Position 숫자 기준으로 다시 정렬
         return (
             min(
                 side_a,
@@ -809,7 +680,7 @@ class CalibrationManager:
 
 
     # ========================================================
-    # 12. 팀원 기준 Safe Angle 범위
+    # 팀원 기준 Safe Angle 범위
     # ========================================================
 
     def get_safe_angle_range(
@@ -858,7 +729,7 @@ class CalibrationManager:
 
 
     # ========================================================
-    # 13. Target Position 안전 검사
+    # Target Position 안전 검사
     # ========================================================
 
     def validate_target_position(
@@ -872,10 +743,7 @@ class CalibrationManager:
         )
 
 
-        # ----------------------------------------------------
-        # STS 자체 범위
-        # ----------------------------------------------------
-
+        # STS 자체 Position 범위
         if not (
             STS_POSITION_MIN
             <= target_position
@@ -889,10 +757,6 @@ class CalibrationManager:
             )
 
 
-        # ----------------------------------------------------
-        # 실제 Calibration Safe Range
-        # ----------------------------------------------------
-
         numeric_min, numeric_max = (
             self.get_safe_position_range(
                 joint_name
@@ -900,6 +764,7 @@ class CalibrationManager:
         )
 
 
+        # 실제 Calibration Safe Range
         if not (
             numeric_min
             <= target_position

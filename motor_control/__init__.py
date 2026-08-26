@@ -1,7 +1,7 @@
 """
 motor_control
 
-팀원은 내부 파일들을 직접 import하지 않고
+팀원은 내부 구현 파일을 직접 import하지 않고
 
     from motor_control import MotorController
 
