@@ -29,7 +29,7 @@ if not portHandler.setBaudRate(BAUDRATE):
 print("✅ 다중 모터 제어 테스트 시작 (1번 ~ 4번)")
 
 # 제어할 모터 ID 리스트
-servo_ids = [1, 2, 3, 4]
+servo_ids = [1, 2, 3]
 target_position = 2048  # 정중앙 위치 (180도)
 speed = 2000
 acc = 50
