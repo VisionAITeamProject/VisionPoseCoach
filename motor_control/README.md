@@ -45,10 +45,12 @@ with MotorController() as arm:
 | `shoulder_lift` | 위 | 아래 |
 | `elbow_flex` | 위 | 아래 |
 | `wrist_flex` | 위 | 아래 |
-| `wrist_roll` | **CCW (반시계)** | **CW (시계)** |
+| `wrist_roll` | **CW (시계)** | **CCW (반시계)** |
 
 > **중요:** `wrist_roll`은 최종 실물 확인 결과  
-> `+ = CCW`, `- = CW` 기준입니다.
+> `+ = CW`, `- = CCW` 기준입니다.
+> 관찰 기준은 **모니터가 위치한 정면에서 로봇팔을 바라보는 기준**입니다.
+> 실측 관계는 `RAW + = CW`, `URDF + = CCW`, `TEAM + = CW`입니다.
 
 ---
 
@@ -101,7 +103,7 @@ arm.move_joint(
 )
 ```
 
-→ Zero 기준 **CCW 30°**
+→ Zero 기준 **CW 30°**
 
 ```python
 arm.move_joint(
@@ -111,7 +113,7 @@ arm.move_joint(
 )
 ```
 
-→ Zero 기준 **CW 30°**
+→ Zero 기준 **CCW 30°**
 
 ---
 
@@ -147,7 +149,7 @@ arm.move_joint_relative(
 )
 ```
 
-→ 현재 위치에서 **CCW 방향으로 15° 추가 이동**
+→ 현재 위치에서 **CW 방향으로 15° 추가 이동**
 
 ```python
 arm.move_joint_relative(
@@ -157,7 +159,7 @@ arm.move_joint_relative(
 )
 ```
 
-→ 현재 위치에서 **CW 방향으로 15° 추가 이동**
+→ 현재 위치에서 **CCW 방향으로 15° 추가 이동**
 
 ---
 
@@ -391,8 +393,8 @@ print(angle)
 `wrist_roll`도 동일하게:
 
 ```text
-+값 = CCW
--값 = CW
++값 = CW
+-값 = CCW
 ```
 
 기준으로 반환됩니다.
@@ -696,7 +698,7 @@ try:
             "shoulder_lift": 20,
             "elbow_flex": 15,
             "wrist_flex": -10,
-            "wrist_roll": 20,   # + = CCW
+            "wrist_roll": 20,   # + = CW
         },
         speed=100
     )

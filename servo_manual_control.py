@@ -18,6 +18,16 @@ Servo ID 2 -> elbow_flex    -> direction = +1
 Servo ID 3 -> wrist_flex    -> direction = +1
 Servo ID 4 -> wrist_roll    -> direction = -1
 
+[wrist_roll 최종 직접 실측 기준]
+관찰 기준: 모니터가 위치한 정면에서 로봇팔을 바라보는 기준
+- raw Position 증가 = CW
+- raw Position 감소 = CCW
+- direction = -1 이므로 URDF + = CCW, URDF - = CW
+- 따라서 이 Manual Control에서 ID4의 i = CCW, o = CW
+
+※ 위 i/o는 URDF +/- 기준이다.
+   팀원용 motor_control 패키지의 TEAM +/- 기준과 혼동하지 않는다.
+
 direction = +1
     STS Position 증가 방향 = URDF Joint +방향
 
@@ -206,6 +216,11 @@ SERVO_CONFIG = {
 
     4: {
         "joint": "wrist_roll",
+
+        # 최종 직접 실측(모니터가 위치한 정면 기준):
+        # raw 증가 = CW / raw 감소 = CCW
+        # direction=-1 -> URDF + = raw 감소 = CCW
+        #                  URDF - = raw 증가 = CW
         "direction": -1,
         "zero_position": None,
         "temporary_zero_position": None,
@@ -1075,6 +1090,10 @@ def wait_until_servo_stops(
 # ============================================================
 # 23. URDF 방향 기준 수동 Step 이동
 # ============================================================
+# wrist_roll(ID4)은 direction=-1이므로:
+#   i (URDF +) -> raw 감소 -> CCW
+#   o (URDF -) -> raw 증가 -> CW
+# 관찰 기준은 모니터가 위치한 정면이다.
 
 def manual_joint_move(
     servo_id,

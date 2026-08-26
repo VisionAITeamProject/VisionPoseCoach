@@ -286,16 +286,21 @@ SERVO_CONFIG = {
         "urdf_min_angle_rad": -2.74385,
         "urdf_max_angle_rad": 2.84121,
 
-        # 실제 테스트 결과
-        # Position 증가 -> CW
-        # 따라서 URDF +방향은 Position 감소
+        # 최종 직접 실측 결과
+        # 관찰 기준: 모니터가 위치한 정면에서 로봇팔을 바라보는 기준
+        # raw Position 증가 -> CW
+        # raw Position 감소 -> CCW
+        #
+        # direction = -1 이므로
+        # URDF + -> raw Position 감소 -> CCW
+        # URDF - -> raw Position 증가 -> CW
         "direction": -1,
 
         # wrist_roll은 보는 방향에 따라 CW/CCW가 달라지므로
-        # 반드시 관찰 기준 방향도 함께 저장한다.
+        # 반드시 실제 측정에 사용한 관찰 기준을 함께 저장한다.
         "raw_position_increase_motion": "CW",
         "raw_position_decrease_motion": "CCW",
-        "direction_reference": "손목 쪽에서 로봇팔 끝단 방향을 바라보는 기준",
+        "direction_reference": "모니터가 위치한 정면에서 로봇팔을 바라보는 기준",
 
         "zero_position": None,
 
@@ -1454,9 +1459,16 @@ def set_zero_position(
 #
 # wrist_roll direction=-1
 #
-# URDF +방향 명령:
+# 최종 실측 기준(모니터가 위치한 정면에서 관찰):
+#   raw Position 증가 = CW
+#   raw Position 감소 = CCW
 #
-# raw Position은 감소하게 된다.
+# 따라서:
+#   URDF + -> raw Position 감소 -> CCW
+#   URDF - -> raw Position 증가 -> CW
+#
+# 주의: 이 i/o 수동조작은 URDF +/- 기준이며,
+# 팀원용 패키지의 TEAM +/- 기준과는 별개이다.
 
 def manual_joint_move(
     servo_id,

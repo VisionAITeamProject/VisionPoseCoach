@@ -57,7 +57,7 @@
             "direction": -1,
             "raw_position_increase_motion": "CW",
             "raw_position_decrease_motion": "CCW",
-            "direction_reference": "손목 쪽에서 로봇팔 끝단 방향을 바라보는 기준",
+            "direction_reference": "모니터가 위치한 정면에서 로봇팔을 바라보는 기준",
             "zero_position": 2875,
             "urdf_min_angle_rad": -2.74385,
             "urdf_max_angle_rad": 2.84121,
