@@ -37,7 +37,7 @@ print("모터 제어 테스트 시작!")
 
 # ID 1번 모터를 2048(중앙) 위치로 이동
 # WritePosEx(ID, 목표위치, 속도, 가속도)
-result, error = packetHandler.WritePosEx(1, 0, 2400, 50)
+result, error = packetHandler.WritePosEx(4, 2048, 2400, 40)
 
 if result == COMM_SUCCESS:
     print("모터 명령 전송 성공!")
