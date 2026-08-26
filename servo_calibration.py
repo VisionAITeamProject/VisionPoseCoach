@@ -216,6 +216,11 @@ SERVO_CONFIG = {
         # 실제 Direction 테스트 결과
         "direction": +1,
 
+        # 실제 로봇에서 확인한 물리적 움직임
+        "raw_position_increase_motion": "팔 끝단이 아래 방향으로 이동",
+        "raw_position_decrease_motion": "팔 끝단이 위 방향으로 이동",
+        "direction_reference": "로봇 정면/측면에서 shoulder_lift 움직임 기준",
+
         "zero_position": None,
 
         "position_at_urdf_min_angle": None,
@@ -235,6 +240,11 @@ SERVO_CONFIG = {
 
         "direction": +1,
 
+        # 실제 로봇에서 확인한 물리적 움직임
+        "raw_position_increase_motion": "팔꿈치 이후 링크와 끝단이 아래 방향으로 이동",
+        "raw_position_decrease_motion": "팔꿈치 이후 링크와 끝단이 위 방향으로 이동",
+        "direction_reference": "elbow_flex 관절 이후 링크 움직임 기준",
+
         "zero_position": None,
 
         "position_at_urdf_min_angle": None,
@@ -253,6 +263,11 @@ SERVO_CONFIG = {
         "urdf_max_angle_rad": 1.65806,
 
         "direction": +1,
+
+        # 실제 로봇에서 확인한 물리적 움직임
+        "raw_position_increase_motion": "손목 끝단이 아래 방향으로 이동",
+        "raw_position_decrease_motion": "손목 끝단이 위 방향으로 이동",
+        "direction_reference": "wrist_flex 굽힘/펴짐 움직임 기준",
 
         "zero_position": None,
 
@@ -275,6 +290,12 @@ SERVO_CONFIG = {
         # Position 증가 -> CW
         # 따라서 URDF +방향은 Position 감소
         "direction": -1,
+
+        # wrist_roll은 보는 방향에 따라 CW/CCW가 달라지므로
+        # 반드시 관찰 기준 방향도 함께 저장한다.
+        "raw_position_increase_motion": "CW",
+        "raw_position_decrease_motion": "CCW",
+        "direction_reference": "손목 쪽에서 로봇팔 끝단 방향을 바라보는 기준",
 
         "zero_position": None,
 
@@ -1910,6 +1931,23 @@ def save_calibration_file():
             "direction":
                 config[
                     "direction"
+                ],
+
+            # 사람이 JSON만 보더라도 실제 움직임 방향을
+            # 이해할 수 있도록 설명용 메타데이터를 함께 저장한다.
+            "raw_position_increase_motion":
+                config[
+                    "raw_position_increase_motion"
+                ],
+
+            "raw_position_decrease_motion":
+                config[
+                    "raw_position_decrease_motion"
+                ],
+
+            "direction_reference":
+                config[
+                    "direction_reference"
                 ],
 
             "zero_position":
